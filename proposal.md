@@ -195,27 +195,43 @@ Develop and validate a foundation model for automated plaque characterization th
 
 **Core Innovation**: Zero-installation browser interface + hospital-deployed AI backend
 
-#### Frontend: TypeScript + Vite + Niivue (Latest)
+#### Frontend: TypeScript + Vite + Niivue v0.66.0
 
-**Technology Stack** (based on proven `frac` project, upgraded):
+**Technology Stack** (based on proven `frac` project layout, modernized with TypeScript):
 ```typescript
 // package.json dependencies
 {
-  "@niivue/niivue": "latest",        // WebGL2 3D visualization
-  "@niivue/dcm2niix": "^1.2.0",      // DICOM conversion in-browser
-  "@niivue/itkwasm-loader": "latest", // DICOM series loading
-  "@kitware/vtk.js": "latest",       // Mesh generation (marching cubes)
-  "typescript": "^5.6.0",             // Type safety
-  "vite": "^7.0.0"                    // Build system
+  "@niivue/niivue": "^0.66.0",        // WebGL2 3D visualization (latest stable)
+  "@niivue/dcm2niix": "^1.2.0",       // DICOM conversion in-browser
+  "@niivue/itkwasm-loader": "latest",  // DICOM series loading
+  "@kitware/vtk.js": "latest",        // Mesh generation (marching cubes)
+  "typescript": "^5.6.0",              // Type safety
+  "vite": "^7.0.0"                     // Build system (modern, fast)
 }
 ```
 
-**Deployment Options**:
-1. **Browser-Based** (Primary): Zero-installation web app via HTTPS
-2. **Tauri Desktop App** (Alternative): Cross-platform native app for offline use
-   - Windows/macOS/Linux support
-   - Local GPU acceleration
-   - Ideal for sites without reliable internet
+**Frac-Inspired Layout:**
+- **Single view:** Large 3D canvas + control panel (default)
+- **Quad view:** Axial/Coronal/Sagittal MPR + 3D render (toggle)
+- **Dark theme:** Minimalist, radiologist-first design (#1a1a1a background)
+- **Modern TypeScript:** Type-safe, scalable architecture
+
+**Loading Strategy:**
+- **NIfTI.gz:** Direct loading via Niivue (preferred for research)
+- **DICOM directories:** In-browser conversion via @niivue/dcm2niix + ITK-WASM
+- **PACS integration:** Backend DICOM → NIfTI conversion (SimpleITK)
+
+**Mesh Conversion Pipeline:**
+- **Client-side (vtk.js):** Fast preview via marching cubes (<1s)
+- **Server-side (nii2mesh):** High-quality decimated meshes for export
+- **Hybrid approach:** Quick preview → background refinement
+
+**Deployment:**
+- **Browser-based** (primary): Zero-installation web app via HTTPS
+- **Frac-inspired UI:** Single/quad view toggle, dark theme, sleek design
+- **TypeScript throughout:** Modern, type-safe, maintainable codebase
+
+**Technical Details:** See `technical-implementation.md` for complete architecture, API endpoints, mesh conversion pipeline, and development phases.
 
 **Project Structure**:
 ```
