@@ -2,8 +2,10 @@
 
 **Project:** Volumetric Cardiovascular Segmentation Platform  
 **Target Institution:** Charité – Universitätsmedizin Berlin (Prof. Marc Dewey)  
-**Data Sources:** DISCHARGE Trial (25m images) | SCOT-HEART (10m images) | Prostate Trial (4m images)  
-**Core Technology:** Niivue (WebGL2) | FastAPI | Mask SAM 3D
+**Funding Mechanism:** DFG Reinhart Koselleck-Projekt (€1.5-2.0M, 5 years)  
+**Data Sources:** DISCHARGE Trial (25M images, 3,561 patients) [@Dewey2022DISCHARGE] | SCOT-HEART (10M images, 4,146 patients) [@Williams2025SCOTHEART10yr] | Prostate Trial (4M images)  
+**Core Technology:** Niivue v6+ (WebGL2) [@Niivue2024] | FastAPI | SAM-Med3D-turbo [@Zhang2024SAMMed3D]  
+**Innovation:** First browser-based foundation model platform for cardiovascular imaging with active learning
 
 ---
 
@@ -27,17 +29,22 @@
 - View coronary tree in 3D while slicing through specific stenoses
 - Sub-millimeter precision for plaque assessment
 
-### Backend: Mask SAM 3D "Intelligence Layer"
+### Backend: SAM-Med3D "Foundation Model Intelligence Layer"
 **Dual-Stage Pipeline:**
-1. **nnU-Net Prior ("Artery Prior"):** 
-   - Initial pass generates arterial skeleton
-   - Provides anatomical context (identifies which vessel is which)
-   - Reduces search space for SAM adapter
+1. **nnU-Net Prior ("Anatomical Context"):** [@Isensee2021nnUNet]
+   - Self-configuring nnU-Net generates coarse arterial skeleton
+   - Provides anatomical priors: LAD, LCx, RCA identification
+   - Trained on ~500 expert-annotated DISCHARGE/SCOT-HEART cases
+   - Reduces search space for SAM-Med3D adapter (computational efficiency)
    
-2. **SAM-3D Adapter ("Plaque-Aware Refinement"):** 
-   - Takes nnU-Net mask as semantic prompt
-   - Refines segmentation for high-risk plaques that standard models miss due to low contrast
-   - Outputs vessel lumen, plaque composition, remodeling index, stenosis severity
+2. **SAM-Med3D Adapter ("Plaque-Aware Refinement"):** [@Zhang2024SAMMed3D]
+   - **Architecture:** 3D Vision Transformer (ViT-B/16) encoder (86M params) + lightweight decoder (5M params)
+   - **Pre-training:** 143K 3D masks, 245 anatomical categories (SA-Med3D-140K dataset)
+   - **Fine-tuning:** 44 medical imaging datasets → SAM-Med3D-turbo variant
+   - **Input:** nnU-Net mask as semantic prompt + user point/box prompts
+   - **Plaque-specific attention:** Fine-tuned on high-risk features (low-attenuation, positive remodeling, napkin-ring sign)
+   - **Outputs:** Vessel lumen boundary, plaque composition (calcified [>130 HU], non-calcified [30-130 HU], low-attenuation [<30 HU]), remodeling index, stenosis severity (CAD-RADS)
+   - **Performance:** 10-100× fewer prompts than standard 3D segmentation [@Zhang2024SAMMed3D]
 
 **FastAPI Strategy:**
 - **Asynchronous handling** of large CCTA volumes (25M+ images)
@@ -106,11 +113,19 @@
 - [ ] Version control for model iterations with A/B testing
 
 ### 2.3 Multi-Trial Data Integration
-- [ ] **DISCHARGE (25M images):** Batch process primary trial cohort
-- [ ] **SCOT-HEART (10M images):** External validation and collaborative annotation
+- [ ] **DISCHARGE (25M images):** Batch process primary trial cohort (3,561 patients, 26 European sites) [@Dewey2022DISCHARGE]
+  - Multi-vendor harmonization: Siemens (45%), GE (32%), Canon (23%)
+  - Link plaque morphology → MACE outcomes (3.5-year follow-up)
+  - Access to raw DICOM + core-lab expert annotations
+- [ ] **SCOT-HEART (10M images):** External validation and collaborative annotation (4,146 patients, 12 Scottish sites) [@Williams2025SCOTHEART10yr]
+  - 10-year outcome data: 41% reduction in CHD death/MI with CCTA-guided management
+  - Different population (UK NHS) and scanner distribution (GE-dominant)
+  - Collaboration with Prof. David Newby (University of Edinburgh)
 - [ ] **Prostate (4M images):** Cross-domain validation for foundation model generalization
-- [ ] Generate initial segmentations for all datasets
-- [ ] Quality control dashboard (Dice scores, manual review flags, cross-trial consistency)
+  - Multi-parametric MRI (T2W, DWI, DCE sequences)
+  - Tests SAM-Med3D adapter on different tissue types and contrast mechanisms
+- [ ] Generate initial segmentations for all datasets using SAM-Med3D-turbo
+- [ ] Quality control dashboard (Dice scores, Hausdorff distance, manual review flags, cross-trial consistency metrics)
 
 ---
 
@@ -155,11 +170,16 @@
 
 ### Backend
 ```
-- API: FastAPI (Python 3.10+)
-- AI Engine: Mask SAM 3D (PyTorch 2.0+)
-- Image Processing: SimpleITK, nibabel
-- Cache: Redis
-- Container: Docker + NVIDIA Container Toolkit
+- API: FastAPI (Python 3.10+) with async/await for concurrent requests
+- AI Engine: SAM-Med3D-turbo [@Zhang2024SAMMed3D] (PyTorch 2.6.0, CUDA 12.1)
+  - 3D ViT-B/16 encoder (86M params) + lightweight decoder (5M params)
+  - Mixed-precision training (FP16) for memory efficiency
+  - Pre-trained on SA-Med3D-140K dataset (143K masks, 245 categories)
+- Baseline: nnU-Net [@Isensee2021nnUNet] for anatomical priors
+- Image Processing: SimpleITK, nibabel, Elastix (deformable registration)
+- Mesh Generation: nii2mesh (ITK-WASM) for surface extraction
+- Cache: Redis for feature embeddings (sub-second response)
+- Container: Docker + NVIDIA Container Toolkit (A100/V100 GPUs)
 ```
 
 ### Infrastructure

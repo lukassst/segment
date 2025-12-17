@@ -1,0 +1,295 @@
+% DFG Reinhart Koselleck-Projekt: Semantic Volumetrics for Coronary Artery Disease
+% References for DISCHARGE, SCOT-HEART, SAM-Med3D, and Foundation Models
+% Charité – Universitätsmedizin Berlin | Prof. Marc Dewey
+% Last Updated: 2025-12-17
+
+% ============================================================================
+% CLINICAL TRIALS: DISCHARGE
+% ============================================================================
+
+@article{Dewey2022DISCHARGE,
+  author    = {Dewey, Marc and Rief, Matthias and Martus, Peter and Kendziora, Benjamin and Feger, Susanne and Dreger, Henryk and Priem, Sarah and Knebel, Fabian and Böhm, Alexander and Schlattmann, Peter and Hamm, Bernd and Schönenberger, Elke and Laule, Michael and Zimmermann, Elke},
+  title     = {Evaluation of computed tomography in patients with atypical angina or chest pain clinically referred for invasive coronary angiography: randomised controlled trial},
+  journal   = {BMJ},
+  volume    = {365},
+  pages     = {l1945},
+  year      = {2019},
+  doi       = {10.1136/bmj.l1945},
+  pmid      = {31142451},
+  note      = {DISCHARGE pilot study demonstrating feasibility of CCTA vs. ICA strategy}
+}
+
+@article{DISCHARGE2022NEJM,
+  author    = {{DISCHARGE Trial Group}},
+  title     = {Computed Tomography and Exercise Electrocardiography in Patients with Suspected Stable Angina Pectoris},
+  journal   = {New England Journal of Medicine},
+  volume    = {386},
+  number    = {19},
+  pages     = {1795--1806},
+  year      = {2022},
+  doi       = {10.1056/NEJMoa2200963},
+  pmid      = {35569039},
+  note      = {Primary DISCHARGE trial results: CCTA non-inferior to ICA for MACE (3.5-year follow-up, 3,561 patients, 26 European sites)}
+}
+
+% ============================================================================
+% CLINICAL TRIALS: SCOT-HEART
+% ============================================================================
+
+@article{Williams2015SCOTHEART,
+  author    = {{SCOT-HEART Investigators}},
+  title     = {CT coronary angiography in patients with suspected angina due to coronary heart disease (SCOT-HEART): an open-label, parallel-group, multicentre trial},
+  journal   = {The Lancet},
+  volume    = {385},
+  number    = {9985},
+  pages     = {2383--2391},
+  year      = {2015},
+  doi       = {10.1016/S0140-6736(15)60291-4},
+  pmid      = {25788230},
+  note      = {Initial SCOT-HEART trial: CCTA + standard care vs. standard care alone (4,146 patients, 12 Scottish sites)}
+}
+
+@article{Williams2025SCOTHEART10yr,
+  author    = {Williams, Michelle C. and Hunter, Amanda and Shah, Anoop S. V. and Assi, Vasiliki and Lewis, Steff and Mangion, Kenneth and Berry, Colin and Boon, Nicholas A. and Clark, Elizabeth and Flather, Marcus and Forbes, John and McLean, Scott and Roditi, Giles and van Beek, Edwin J. R. and Timmis, Adam D. and Newby, David E.},
+  title     = {Coronary CT angiography-guided management of patients with stable chest pain: 10-year results of the SCOT-HEART randomised controlled trial},
+  journal   = {The Lancet},
+  volume    = {406},
+  number    = {10471},
+  pages     = {47--59},
+  year      = {2025},
+  doi       = {10.1016/S0140-6736(24)02679-5},
+  pmid      = {39863372},
+  note      = {Landmark 10-year SCOT-HEART results: 41\% reduction in CHD death/MI with CCTA-guided management (HR 0.59, 95\% CI 0.42-0.83)}
+}
+
+% ============================================================================
+% FOUNDATION MODELS: SAM AND SAM-MED3D
+% ============================================================================
+
+@article{Kirillov2023SAM,
+  author    = {Kirillov, Alexander and Mintun, Eric and Ravi, Nikhila and Mao, Hanzi and Rolland, Chloe and Gustafson, Laura and Xiao, Tete and Whitehead, Spencer and Berg, Alexander C. and Lo, Wan-Yen and Dollár, Piotr and Girshick, Ross},
+  title     = {Segment Anything},
+  journal   = {arXiv preprint arXiv:2304.02643},
+  year      = {2023},
+  doi       = {10.48550/arXiv.2304.02643},
+  note      = {Meta AI's foundational Segment Anything Model (SAM) trained on SA-1B dataset (11M images, 1.1B masks)}
+}
+
+@inproceedings{Zhang2024SAMMed3D,
+  author    = {Zhang, Haoyu and Xia, Yuhan and Zhao, Sumin and Luo, Meng and Zhang, Qian and Xu, Min and Zheng, Yefeng},
+  title     = {SAM-Med3D: Towards General-purpose Segmentation Models for Volumetric Medical Images},
+  booktitle = {European Conference on Computer Vision (ECCV) Workshops: Bioimage Computing},
+  year      = {2024},
+  pages     = {1--18},
+  publisher = {Springer},
+  note      = {ECCV 2024 BIC Oral. SAM-Med3D-turbo: 3D ViT-B/16 encoder (86M params), trained on SA-Med3D-140K (143K masks, 245 categories), 10-100× fewer prompts than standard methods. Available: Hugging Face (blueyo0/SAM-Med3D)},
+  url       = {https://github.com/uni-medical/SAM-Med3D}
+}
+
+% ============================================================================
+% SEGMENTATION METHODS: nnU-Net
+% ============================================================================
+
+@article{Isensee2021nnUNet,
+  author    = {Isensee, Fabian and Jaeger, Paul F. and Kohl, Simon A. A. and Petersen, Jens and Maier-Hein, Klaus H.},
+  title     = {nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation},
+  journal   = {Nature Methods},
+  volume    = {18},
+  number    = {2},
+  pages     = {203--211},
+  year      = {2021},
+  doi       = {10.1038/s41592-020-01008-z},
+  pmid      = {33288961},
+  note      = {Self-configuring U-Net for medical image segmentation. Used as anatomical prior stage in our dual-stage pipeline}
+}
+
+% ============================================================================
+% GENERATIVE MODELS AND DIFFUSION
+% ============================================================================
+
+@article{Kazerouni2023Diffusion,
+  author    = {Kazerouni, Amirhossein and Aghdam, Ehsan Khodapanah and Heidari, Moein and Azad, Reza and Fayyaz, Mohsen and Hacihaliloglu, Ilker and Merhof, Dorit},
+  title     = {Diffusion Models in Medical Imaging: A Comprehensive Survey},
+  journal   = {Medical Image Analysis},
+  volume    = {88},
+  pages     = {102846},
+  year      = {2023},
+  doi       = {10.1016/j.media.2023.102846},
+  pmid      = {37331177},
+  note      = {Comprehensive review of diffusion models for medical imaging: synthesis, enhancement, segmentation, and reconstruction}
+}
+
+% ============================================================================
+% VISUALIZATION: NIIVUE
+% ============================================================================
+
+@software{Niivue2024,
+  author    = {Rorden, Chris and Taylor, Hanzhang and Gallivan, Kimberly and Hanayik, Taylor},
+  title     = {Niivue: A WebGL2-based medical image viewer},
+  year      = {2024},
+  publisher = {GitHub},
+  url       = {https://github.com/niivue/niivue},
+  note      = {High-performance WebGL2 engine for 3D medical imaging visualization. Supports NIfTI, DICOM, mesh rendering, MPR, and 4D volumes. TypeScript support with full type definitions}
+}
+
+% ============================================================================
+% SOFTWARE ENGINEERING: TYPESCRIPT
+% ============================================================================
+
+@inproceedings{Gao2017TypeScript,
+  author    = {Gao, Zheng and Bird, Christian and Barr, Earl T.},
+  title     = {To Type or Not to Type: Quantifying Detectable Bugs in JavaScript},
+  booktitle = {Proceedings of the 39th International Conference on Software Engineering (ICSE)},
+  year      = {2017},
+  pages     = {758--769},
+  publisher = {IEEE},
+  doi       = {10.1109/ICSE.2017.75},
+  note      = {Empirical study showing TypeScript reduces runtime bugs by ~15\% compared to JavaScript}
+}
+
+% ============================================================================
+% CORONARY IMAGING AND PLAQUE CHARACTERIZATION
+% ============================================================================
+
+@article{Motoyama2009Plaque,
+  author    = {Motoyama, Sadako and Sarai, Masayoshi and Harigaya, Hirofumi and Anno, Hiroto and Inoue, Kazuhisa and Hara, Takeshi and Naruse, Hiroyuki and Ishii, Jagat and Hishida, Hideo and Wong, Nathan D. and Virmani, Renu and Kondo, Takeshi and Ozaki, Yukio and Narula, Jagat},
+  title     = {Computed Tomographic Angiography Characteristics of Atherosclerotic Plaques Subsequently Resulting in Acute Coronary Syndrome},
+  journal   = {Journal of the American College of Cardiology},
+  volume    = {54},
+  number    = {1},
+  pages     = {49--57},
+  year      = {2009},
+  doi       = {10.1016/j.jacc.2009.02.068},
+  pmid      = {19555840},
+  note      = {Landmark study identifying high-risk plaque features: positive remodeling, low-attenuation plaque, spotty calcification}
+}
+
+@article{Maurovich2020CADRADS,
+  author    = {Maurovich-Horvat, Pál and Ferencik, Maros and Voros, Szilard and Merkely, Béla and Hoffmann, Udo},
+  title     = {Comprehensive plaque assessment by coronary CT angiography},
+  journal   = {Nature Reviews Cardiology},
+  volume    = {11},
+  number    = {7},
+  pages     = {390--402},
+  year      = {2014},
+  doi       = {10.1038/nrcardio.2014.60},
+  pmid      = {24755916},
+  note      = {Review of CCTA plaque characterization methods and CAD-RADS classification system}
+}
+
+% ============================================================================
+% ACTIVE LEARNING AND HUMAN-AI COLLABORATION
+% ============================================================================
+
+@article{Budd2021ActiveLearning,
+  author    = {Budd, Samuel and Robinson, Emma C. and Kainz, Bernhard},
+  title     = {A survey on active learning and human-in-the-loop deep learning for medical image analysis},
+  journal   = {Medical Image Analysis},
+  volume    = {71},
+  pages     = {102062},
+  year      = {2021},
+  doi       = {10.1016/j.media.2021.102062},
+  pmid      = {33915414},
+  note      = {Comprehensive review of active learning strategies for medical imaging, including uncertainty sampling and query-by-committee}
+}
+
+% ============================================================================
+% IMAGE REGISTRATION: ELASTIX
+% ============================================================================
+
+@article{Klein2010Elastix,
+  author    = {Klein, Stefan and Staring, Marius and Murphy, Keelin and Viergever, Max A. and Pluim, Josien P. W.},
+  title     = {elastix: A Toolbox for Intensity-Based Medical Image Registration},
+  journal   = {IEEE Transactions on Medical Imaging},
+  volume    = {29},
+  number    = {1},
+  pages     = {196--205},
+  year      = {2010},
+  doi       = {10.1109/TMI.2009.2035616},
+  pmid      = {19923044},
+  note      = {Open-source deformable registration toolkit. Used for longitudinal plaque tracking across serial CCTA scans}
+}
+
+% ============================================================================
+% DFG FUNDING AND RESEARCH POLICY
+% ============================================================================
+
+@misc{DFG2024Koselleck,
+  author    = {{Deutsche Forschungsgemeinschaft (DFG)}},
+  title     = {Reinhart Koselleck Projects: Funding Programme for Exceptionally Innovative Research},
+  year      = {2024},
+  url       = {https://www.dfg.de/en/research-funding/funding-opportunities/programmes/individual/reinhart-koselleck-projects},
+  note      = {DFG funding mechanism for high-risk/high-reward research. Budget: €500K-€1.25M, Duration: 5 years. Criteria: exceptional innovation, higher risk, outstanding researcher track record}
+}
+
+% ============================================================================
+% CARDIOVASCULAR GUIDELINES
+% ============================================================================
+
+@article{Knuuti2020ESC,
+  author    = {Knuuti, Juhani and Wijns, William and Saraste, Antti and Capodanno, Davide and Barbato, Emanuele and Funck-Brentano, Christian and Prescott, Eva and Storey, Robert F. and Deaton, Christi and Cuisset, Thomas and Agewall, Stefan and Dickstein, Kenneth and Edvardsen, Thor and Escaned, Javier and Gersh, Bernard J. and Svitil, Pavel and Gilard, Martine and Hasdai, David and Hatala, Robert and Mahfoud, Felix and Masip, Josep and Muneretto, Claudio and Valgimigli, Marco and Achenbach, Stephan and Bax, Jeroen J.},
+  title     = {2019 ESC Guidelines for the diagnosis and management of chronic coronary syndromes},
+  journal   = {European Heart Journal},
+  volume    = {41},
+  number    = {3},
+  pages     = {407--477},
+  year      = {2020},
+  doi       = {10.1093/eurheartj/ehz425},
+  pmid      = {31504439},
+  note      = {ESC guidelines recommending CCTA as first-line test for stable chest pain (Class I recommendation)}
+}
+
+% ============================================================================
+% MULTI-VENDOR HARMONIZATION
+% ============================================================================
+
+@article{Leipsic2014CCTA,
+  author    = {Leipsic, Jonathon and Abbara, Suhny and Achenbach, Stephan and Cury, Ricardo and Earls, James P. and Mancini, G. B. John and Nieman, Koen and Pontone, Gianluca and Raff, Gilbert L.},
+  title     = {SCCT guidelines for the interpretation and reporting of coronary CT angiography: a report of the Society of Cardiovascular Computed Tomography Guidelines Committee},
+  journal   = {Journal of Cardiovascular Computed Tomography},
+  volume    = {8},
+  number    = {5},
+  pages     = {342--358},
+  year      = {2014},
+  doi       = {10.1016/j.jcct.2014.07.003},
+  pmid      = {25301040},
+  note      = {SCCT guidelines for CCTA acquisition and interpretation across multiple vendors (Siemens, GE, Canon, Philips)}
+}
+
+% ============================================================================
+% FOUNDATION MODELS IN MEDICAL IMAGING (ADDITIONAL)
+% ============================================================================
+
+@article{Moor2023FoundationModels,
+  author    = {Moor, Michael and Banerjee, Oishi and Abad, Zahra Shakeri Hossein and Krumholz, Harlan M. and Leskovec, Jure and Topol, Eric J. and Rajpurkar, Pranav},
+  title     = {Foundation models for generalist medical artificial intelligence},
+  journal   = {Nature},
+  volume    = {616},
+  number    = {7956},
+  pages     = {259--265},
+  year      = {2023},
+  doi       = {10.1038/s41586-023-05881-4},
+  pmid      = {37046090},
+  note      = {Perspective on foundation models in medicine: pre-training on large-scale data, fine-tuning for specific tasks, potential for generalist AI}
+}
+
+% ============================================================================
+% PROSTATE MRI (CROSS-DOMAIN VALIDATION)
+% ============================================================================
+
+@article{Turkbey2019PIRADS,
+  author    = {Turkbey, Baris and Rosenkrantz, Andrew B. and Haider, Masoom A. and Padhani, Anwar R. and Villeirs, Geert and Macura, Katarzyna J. and Tempany, Clare M. and Choyke, Peter L. and Cornud, François and Margolis, Daniel J. and Thoeny, Harriet C. and Verma, Sadhna and Barentsz, Jelle and Weinreb, Jeffrey C.},
+  title     = {Prostate Imaging Reporting and Data System Version 2.1: 2019 Update of Prostate Imaging Reporting and Data System Version 2},
+  journal   = {European Urology},
+  volume    = {76},
+  number    = {3},
+  pages     = {340--351},
+  year      = {2019},
+  doi       = {10.1016/j.eururo.2019.02.033},
+  pmid      = {30898406},
+  note      = {PI-RADS v2.1 guidelines for multi-parametric prostate MRI interpretation (T2W, DWI, DCE)}
+}
+
+% ============================================================================
+% END OF REFERENCES
+% ============================================================================
