@@ -104,10 +104,14 @@ Traditional AI in radiology is **static**—focused on **detection** (finding le
 
 #### Prostate Trial (4M images)
 - **Design:** Multi-parametric MRI for prostate cancer detection
-- **Scale:** ~4 million image slices across multiple sequences
+- **Scale:** ~4 million image slices across multiple sequences (T2W, DWI, DCE)
 - **Cross-Domain Impact:** Validates foundation model generalization beyond cardiovascular
 - **Our Advantage:** Tests SAM adapter on different tissue types, contrast mechanisms
 - **Status:** Data access negotiations in progress
+- **Technical Validation:** Leverage existing MRI classification pipeline (boahK/MRI_Classifier)
+  - Pre-trained models for multi-parametric body MRI series classification
+  - Confusion matrix validation framework
+  - Siemens/Philips multi-vendor training strategy (Strategy 2 approach)
 
 #### Utilizing the Annotation Goldmine
 - **Existing high-quality ground truth segmentations** from prior core-lab work (DISCHARGE + SCOT-HEART)
@@ -184,12 +188,21 @@ Develop and validate a foundation model for automated plaque characterization th
 ```typescript
 // package.json dependencies
 {
-  "@niivue/niivue": "latest",        // Check: likely 0.x series, not v6
-  "@niivue/dcm2niix": "^1.2.0",      // DICOM conversion
+  "@niivue/niivue": "latest",        // WebGL2 3D visualization
+  "@niivue/dcm2niix": "^1.2.0",      // DICOM conversion in-browser
+  "@niivue/itkwasm-loader": "latest", // DICOM series loading
+  "@kitware/vtk.js": "latest",       // Mesh generation (marching cubes)
   "typescript": "^5.6.0",             // Type safety
   "vite": "^7.0.0"                    // Build system
 }
 ```
+
+**Deployment Options**:
+1. **Browser-Based** (Primary): Zero-installation web app via HTTPS
+2. **Tauri Desktop App** (Alternative): Cross-platform native app for offline use
+   - Windows/macOS/Linux support
+   - Local GPU acceleration
+   - Ideal for sites without reliable internet
 
 **Project Structure**:
 ```
@@ -210,14 +223,33 @@ flow-segment-frontend/
 └── tsconfig.json
 ```
 
-**Key capabilities** (from Niivue):
-- WebGL2 rendering for 3D CCTA visualization
-- Interactive click-to-segment (capture 3D coordinates)
-- Multi-planar reconstruction (MPR)
-- Mesh overlay rendering (for AI segmentation results)
-- 4D volume support (for perfusion imaging)
+**Key capabilities** (from Niivue + vtk.js):
+- **WebGL2 rendering** for 3D CCTA visualization
+- **Interactive click-to-segment** (capture 3D coordinates)
+- **Multi-planar reconstruction (MPR)** with curved reformats
+- **Mesh overlay rendering** (for AI segmentation results)
+- **Surface mesh generation** via vtk.js ImageMarchingCubes:
+  - Convert binary masks → 3D surface meshes in-browser
+  - Alternative: nii2mesh (ITK-WASM) for high-quality decimated meshes
+  - Point cloud → mesh conversion for coronary artery surfaces
+- **DICOM processing**:
+  - dcm2niix for DICOM → NIfTI conversion
+  - ITK-WASM loader for multi-series DICOM loading
+- **4D volume support** (for perfusion imaging)
 
-#### Backend: FastAPI + SAM-Med3D
+**3D Mesh Visualization & Generation**:
+- **Point cloud → surface mesh**: Direct NVMesh construction from coronary artery point clouds
+  - Input: vertices (Float32Array) + triangle indices (Uint32Array) in mm coordinates
+  - Overlay coronary surface meshes on CT base layer
+  - Example: `nv.addMesh(new NVMesh(pts, tris, 'coronary', rgba, opacity, visible, gl))`
+- **Mask volume → surface mesh**: Two pathways
+  - **Browser-based**: vtk.js ImageMarchingCubes for in-browser marching cubes
+  - **Server-based**: nii2mesh (ITK-WASM) for high-quality decimated meshes
+- **Connectome visualization**: 3D line overlays for vessel centerlines
+  - Nodes (x,y,z in mm) + edges → closed loop rendering
+  - Useful for displaying vessel paths and cross-sectional contours
+
+#### Backend: FastAPI + SAM-Med3D + Image Processing Pipeline
 
 **Model**: SAM-Med3D-turbo (uni-medical/SAM-Med3D)
 - Pre-trained on 44 medical imaging datasets
@@ -231,9 +263,16 @@ flow-segment-frontend/
 POST /api/segment/point       # Point-based prompting
 POST /api/segment/box         # Bounding box prompting
 POST /api/volumes/upload      # DICOM/NIfTI upload
+POST /api/mesh/generate       # Mask → mesh conversion (nii2mesh)
+POST /api/register/longitudinal # Image registration (Elastix)
 GET  /api/volumes/{id}        # Retrieve volume
 GET  /api/health              # Health check
 ```
+
+**Image Processing Tools** (Python backend):
+- **Elastix** (elastix.wasm.itk.eth.limo): Deformable registration for longitudinal tracking
+- **nii2mesh** (ITK-WASM): High-quality surface mesh generation with decimation
+- **SimpleITK**: Additional preprocessing and resampling utilities
 
 **Deployment**: Docker container on Charité GPU cluster
 - NVIDIA A100/V100 GPUs
@@ -265,10 +304,16 @@ GET  /api/health              # Health check
 - Compare AI vs. expert segmentations (100 cases, 3 readers)
 - Validate on SCOT-HEART (external cohort, n=4,100)
 - MACE prediction analysis
+- **Cross-domain validation**: Apply to prostate MRI dataset
+  - Test generalization to non-cardiovascular imaging
+  - Leverage MRI_Classifier framework for multi-sequence handling
 - **Deliverable**: Clinical validation manuscript
 
 **Phase 5: Longitudinal Extension (Months 37-48)**
-- Implement temporal registration for serial scans
+- Implement temporal registration for serial scans:
+  - **Elastix** for deformable registration (elastix.wasm.itk.eth.limo)
+  - Handle multi-timepoint alignment despite cardiac motion
+  - Track individual plaque progression across follow-up scans
 - Train progression prediction model
 - Build digital twin framework
 - **Deliverable**: Longitudinal modeling manuscript
@@ -351,14 +396,27 @@ GET  /api/health              # Health check
 
 **Architecture**:
 ```
-[Clinician Browser] ←HTTPS/VPN→ [Charité Firewall] → [Frontend: Nginx] 
-                                                      ↓
-                                         [Backend: FastAPI + SAM-Med3D]
-                                                      ↓
-                                         [GPU Cluster: NVIDIA A100]
-                                                      ↓
-                                         [PACS Integration]
+[Clinician Browser/Tauri App] ←HTTPS/VPN→ [Charité Firewall] → [Frontend: Nginx] 
+                                                                       ↓
+                                                      [Backend: FastAPI + SAM-Med3D]
+                                                                       ↓
+                                                           [Processing Pipeline]
+                                                           - Elastix (registration)
+                                                           - nii2mesh (surface gen)
+                                                           - dcm2niix (conversion)
+                                                                       ↓
+                                                      [GPU Cluster: NVIDIA A100]
+                                                                       ↓
+                                                           [PACS Integration]
 ```
+
+**Deployment Flexibility**:
+- **Primary**: Browser-based (zero installation, works on any device)
+- **Alternative**: Tauri desktop app for:
+  - Sites with limited internet bandwidth
+  - Offline processing scenarios
+  - Users preferring native app experience
+  - Cross-platform: Windows, macOS, Linux
 
 **Security & Compliance**:
 - No external data transfer (all processing on-premise)
