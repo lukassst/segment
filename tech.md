@@ -1302,6 +1302,640 @@ def volume_to_mesh(
 
 ---
 
+## 🎯 Vessel Geometry Creation: Complete Workflow
+
+### Overview: From Segmentation to Mesh Visualization
+
+**Multiple Pathways to Create Vessel Geometry:**
+
+```
+Segmentation Mask (NIfTI) ──┐
+                             ├──> Marching Cubes ──> Mesh (PLY/VTK/GIfTI) ──> NiiVue Display
+Point Cloud (from MEDIS) ────┤
+                             ├──> Poisson Recon ───> Mesh (MZ3/OBJ) ────────> NiiVue Display
+Contour Rings (MEDIS TXT) ───┘
+                             └──> Direct Tube ────> Mesh (STL) ────────────> NiiVue Display
+```
+
+**Key Decision Factors:**
+- **Speed:** Direct tube mesh (50ms) < Marching cubes (1-3s) < Poisson (3-10s)
+- **Quality:** Poisson (smoothest) > Marching cubes (smooth) > Direct tube (faceted)
+- **Use case:** Interactive preview (fast) vs. Final visualization (quality)
+
+---
+
+### Pathway 1: Segmentation Mask → Mesh (Marching Cubes)
+
+**Best for:** AI-generated segmentation masks from SAM-Med3D or nnU-Net
+
+**Workflow:**
+1. **Input:** Binary segmentation mask (NIfTI format, 0=background, 1=vessel)
+2. **Algorithm:** Marching cubes isosurface extraction at threshold 0.5
+3. **Post-processing:** Laplacian smoothing + mesh decimation
+4. **Output:** Triangular mesh (PLY, VTK, GIfTI, MZ3)
+
+**Implementation Options:**
+
+**Option A: Client-side with vtk.js (Fast Preview)**
+```typescript
+// Frontend: utils/marchingCubesMesh.ts
+import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
+import vtkImageMarchingCubes from '@kitware/vtk.js/Filters/General/ImageMarchingCubes';
+import vtkWindowedSincPolyDataFilter from '@kitware/vtk.js/Filters/General/WindowedSincPolyDataFilter';
+
+export async function segmentationToMesh(
+  maskData: Uint8Array,
+  dimensions: [number, number, number],
+  spacing: [number, number, number],
+  smoothIterations: number = 15
+): Promise<{ vertices: Float32Array; triangles: Uint32Array }> {
+  
+  // Create VTK image from mask
+  const imageData = vtkImageData.newInstance();
+  imageData.setDimensions(dimensions);
+  imageData.setSpacing(spacing);
+  imageData.getPointData().setScalars(
+    vtkDataArray.newInstance({ values: maskData })
+  );
+  
+  // Marching cubes
+  const marchingCubes = vtkImageMarchingCubes.newInstance({
+    contourValue: 0.5,
+    computeNormals: true,
+    mergePoints: true
+  });
+  marchingCubes.setInputData(imageData);
+  
+  // Smooth mesh (Windowed Sinc filter - better than Laplacian)
+  const smoother = vtkWindowedSincPolyDataFilter.newInstance({
+    numberOfIterations: smoothIterations,
+    passBand: 0.1,
+    nonManifoldSmoothing: true,
+    normalizeCoordinates: true
+  });
+  smoother.setInputConnection(marchingCubes.getOutputPort());
+  smoother.update();
+  
+  // Extract mesh data
+  const polyData = smoother.getOutputData();
+  const vertices = new Float32Array(polyData.getPoints().getData());
+  const triangles = new Uint32Array(polyData.getPolys().getData());
+  
+  return { vertices, triangles };
+}
+
+// Usage: Convert SAM-Med3D output to mesh
+const segMask = await fetchSegmentationMask('/api/segment', promptPoint);
+const mesh = await segmentationToMesh(
+  segMask.data,
+  [512, 512, 300],
+  [0.5, 0.5, 0.625],
+  15  // Smooth iterations
+);
+
+// Display in NiiVue
+const nvMesh = nv.createMeshFromVertices(mesh.vertices, mesh.triangles);
+nv.addMesh(nvMesh);
+```
+
+**Option B: Server-side with nii2mesh (High Quality)**
+```python
+# Backend: app/services/nii2mesh_wrapper.py
+import subprocess
+import tempfile
+from pathlib import Path
+import nibabel as nib
+import numpy as np
+
+def segmentation_to_mesh_nii2mesh(
+    mask: np.ndarray,
+    affine: np.ndarray,
+    output_format: str = 'mz3',  # Fast, compact format
+    pre_smooth: bool = True,
+    reduction: float = 0.15,  # Keep 15% of triangles
+    smooth_iterations: int = 10
+) -> Path:
+    """
+    Convert segmentation mask to mesh using nii2mesh.
+    
+    Args:
+        mask: Binary segmentation (0=background, 1=vessel)
+        affine: NIfTI affine matrix
+        output_format: 'mz3', 'ply', 'gii', 'obj', 'stl', 'vtk'
+        pre_smooth: Gaussian blur before marching cubes
+        reduction: Mesh simplification (0.15 = keep 15% triangles)
+        smooth_iterations: Post-mesh smoothing iterations
+    
+    Returns:
+        Path to output mesh file
+    """
+    # Save mask as temporary NIfTI
+    with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as tmp_nii:
+        nii_path = Path(tmp_nii.name)
+        nib.save(nib.Nifti1Image(mask.astype(np.uint8), affine), nii_path)
+    
+    # Output mesh path
+    output_path = nii_path.with_suffix(f'.{output_format}')
+    
+    # Build nii2mesh command
+    cmd = [
+        'nii2mesh',
+        str(nii_path),
+        '-i', 'm',  # Medium intensity threshold (auto-detect)
+        '-p', '1' if pre_smooth else '0',
+        '-r', str(reduction),
+        '-s', str(smooth_iterations),
+        '-l', '1',  # Keep only largest component
+        '-b', '1',  # Fill bubbles
+        str(output_path)
+    ]
+    
+    # Run nii2mesh
+    subprocess.run(cmd, check=True, capture_output=True)
+    
+    # Cleanup
+    nii_path.unlink()
+    
+    return output_path
+
+# FastAPI endpoint
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
+
+router = APIRouter()
+
+@router.post('/api/mesh/from-segmentation')
+async def create_mesh_from_segmentation(
+    segmentation_id: str,
+    format: str = 'mz3'
+):
+    """Generate mesh from segmentation mask."""
+    
+    # Load segmentation
+    seg_nii = nib.load(f'/data/segmentations/{segmentation_id}.nii.gz')
+    mask = seg_nii.get_fdata() > 0.5
+    
+    # Generate mesh
+    mesh_path = segmentation_to_mesh_nii2mesh(
+        mask,
+        seg_nii.affine,
+        output_format=format,
+        reduction=0.15,
+        smooth_iterations=10
+    )
+    
+    return FileResponse(
+        mesh_path,
+        media_type='application/octet-stream',
+        filename=f'{segmentation_id}.{format}'
+    )
+```
+
+---
+
+### Pathway 2: Point Cloud → Mesh (Surface Reconstruction)
+
+**Best for:** Sparse point clouds from centerline tracking or manual annotations
+
+**Three Algorithms:**
+
+#### 2A: Ball Pivoting Algorithm (Fast, Good for Uniform Density)
+```python
+# Backend: app/services/point_cloud_mesh.py
+import open3d as o3d
+import numpy as np
+
+def point_cloud_to_mesh_ball_pivoting(
+    points: np.ndarray,
+    normals: np.ndarray = None,
+    radii: list = [0.5, 1.0, 2.0, 4.0]  # mm
+) -> dict:
+    """
+    Ball pivoting algorithm for point cloud meshing.
+    Fast but requires uniform point density.
+    
+    Args:
+        points: Nx3 array of 3D points
+        normals: Nx3 array of normal vectors (computed if None)
+        radii: List of ball radii for multi-scale reconstruction
+    """
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # Estimate normals if not provided
+    if normals is None:
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=2.0, max_nn=30
+            )
+        )
+        pcd.orient_normals_consistent_tangent_plane(k=15)
+    else:
+        pcd.normals = o3d.utility.Vector3dVector(normals)
+    
+    # Ball pivoting reconstruction
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd,
+        o3d.utility.DoubleVector(radii)
+    )
+    
+    # Post-process
+    mesh.remove_degenerate_triangles()
+    mesh.remove_duplicated_triangles()
+    mesh.remove_duplicated_vertices()
+    mesh.remove_non_manifold_edges()
+    
+    return {
+        'vertices': np.asarray(mesh.vertices).flatten().tolist(),
+        'triangles': np.asarray(mesh.triangles).flatten().tolist()
+    }
+```
+
+#### 2B: Poisson Surface Reconstruction (Smoothest, Best Quality)
+```python
+def point_cloud_to_mesh_poisson(
+    points: np.ndarray,
+    normals: np.ndarray = None,
+    depth: int = 9,  # Octree depth (higher = more detail)
+    density_threshold: float = 0.01  # Remove low-density regions
+) -> dict:
+    """
+    Poisson surface reconstruction - produces smoothest meshes.
+    Best for final high-quality visualization.
+    
+    Args:
+        points: Nx3 array of 3D points
+        normals: Nx3 array of normal vectors (required for Poisson)
+        depth: Octree depth (8-10 typical, higher = more detail)
+        density_threshold: Remove vertices with density < quantile
+    """
+    # Create point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # Estimate normals (critical for Poisson)
+    if normals is None:
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=2.0, max_nn=30
+            )
+        )
+        pcd.orient_normals_consistent_tangent_plane(k=15)
+    else:
+        pcd.normals = o3d.utility.Vector3dVector(normals)
+    
+    # Poisson reconstruction
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd,
+        depth=depth,
+        width=0,  # Auto-compute
+        scale=1.1,  # Slightly larger bounding box
+        linear_fit=False
+    )
+    
+    # Remove low-density vertices (extrapolated regions)
+    densities = np.asarray(densities)
+    density_threshold_value = np.quantile(densities, density_threshold)
+    vertices_to_remove = densities < density_threshold_value
+    mesh.remove_vertices_by_mask(vertices_to_remove)
+    
+    return {
+        'vertices': np.asarray(mesh.vertices).flatten().tolist(),
+        'triangles': np.asarray(mesh.triangles).flatten().tolist()
+    }
+```
+
+#### 2C: Alpha Shapes (Good for Non-Convex Shapes)
+```python
+def point_cloud_to_mesh_alpha_shape(
+    points: np.ndarray,
+    alpha: float = 0.03  # Smaller = tighter fit
+) -> dict:
+    """
+    Alpha shape reconstruction - good for non-convex vessels.
+    Faster than Poisson but less smooth.
+    
+    Args:
+        points: Nx3 array of 3D points
+        alpha: Alpha parameter (smaller = tighter fit to points)
+    """
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # Alpha shape
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
+        pcd, alpha
+    )
+    mesh.compute_vertex_normals()
+    
+    return {
+        'vertices': np.asarray(mesh.vertices).flatten().tolist(),
+        'triangles': np.asarray(mesh.triangles).flatten().tolist()
+    }
+```
+
+---
+
+### Pathway 3: Contour Rings → Mesh (Direct Tube)
+
+**Best for:** MEDIS TXT contours (already implemented above in Approach 0)
+
+**Advantages:**
+- Fastest method (50ms)
+- Preserves exact contour geometry
+- No interpolation artifacts
+
+**See earlier section:** "Approach 0: Ultra-Simple STL Generation"
+
+---
+
+## 🎨 NiiVue Mesh Format Support & Best Practices
+
+### Supported Mesh Formats in NiiVue v0.66.0
+
+**NiiVue natively supports 15+ mesh formats:**
+
+| **Format** | **Extension** | **Type** | **Size** | **Speed** | **Recommended** |
+|------------|---------------|----------|----------|-----------|------------------|
+| **MZ3** | `.mz3` | Binary | ⭐⭐⭐⭐⭐ Smallest | ⭐⭐⭐⭐⭐ Fastest | ✅ **Best for web** |
+| **PLY** | `.ply` | Binary | ⭐⭐⭐⭐ Small | ⭐⭐⭐⭐ Fast | ✅ **Good for web** |
+| **GIfTI** | `.gii` | Base64 | ⭐⭐ Large | ⭐⭐ Slow | ❌ Neuroimaging only |
+| **VTK** | `.vtk` | ASCII | ⭐⭐⭐ Medium | ⭐⭐⭐ Medium | ✅ **Good compatibility** |
+| **OBJ** | `.obj` | ASCII | ⭐⭐ Large | ⭐⭐ Slow | ❌ 3D printing only |
+| **STL** | `.stl` | Binary | ⭐ Huge | ⭐ Very slow | ❌ Avoid (no vertex reuse) |
+| **FreeSurfer** | `.pial` | Binary | ⭐⭐⭐⭐ Small | ⭐⭐⭐⭐ Fast | ✅ Neuroimaging |
+| **OFF** | `.off` | ASCII | ⭐⭐⭐ Medium | ⭐⭐⭐ Medium | ✅ Simple format |
+
+**Recommendation for Web Application:**
+1. **Primary:** MZ3 format (smallest, fastest loading)
+2. **Fallback:** PLY binary (widely supported, fast)
+3. **Avoid:** STL (3x larger), GIfTI (slow base64 decoding), OBJ (ASCII overhead)
+
+---
+
+### MZ3 Format: Best Choice for Web Viewing
+
+**Why MZ3?**
+- ✅ **Smallest file size:** 3-5x smaller than PLY, 10x smaller than STL
+- ✅ **Fastest loading:** Binary format with efficient compression
+- ✅ **Full feature support:** Vertices, faces, normals, colors, scalars
+- ✅ **Native NiiVue support:** No conversion needed
+- ✅ **Created by NiiVue author:** Optimized for medical imaging
+
+**MZ3 Format Specification:**
+```
+MZ3 Binary Format:
+- Magic number: 0x4D5A3301 ("MZ3" + version)
+- Header: vertex count, face count, attribute flags
+- Vertices: Float32Array (x,y,z per vertex)
+- Faces: Uint32Array (i0,i1,i2 per triangle)
+- Optional: Normals, colors, scalars (per-vertex data)
+- Compression: Optional gzip compression
+```
+
+**Generate MZ3 with nii2mesh:**
+```bash
+# Command-line
+nii2mesh input.nii.gz -i m -r 0.15 -s 10 output.mz3
+
+# Python wrapper
+from app.services.nii2mesh_wrapper import segmentation_to_mesh_nii2mesh
+
+mesh_path = segmentation_to_mesh_nii2mesh(
+    mask,
+    affine,
+    output_format='mz3',  # Smallest, fastest
+    reduction=0.15,
+    smooth_iterations=10
+)
+```
+
+**Load MZ3 in NiiVue:**
+```typescript
+// Frontend: Load MZ3 mesh
+import { Niivue } from '@niivue/niivue';
+
+const nv = new Niivue();
+await nv.attachToCanvas(document.getElementById('gl'));
+
+// Load MZ3 mesh (fast!)
+await nv.loadMeshes([
+  { url: '/meshes/LAD_lumen.mz3', rgba255: [255, 0, 0, 200] },  // Red lumen
+  { url: '/meshes/LAD_vessel.mz3', rgba255: [0, 0, 255, 100] }   // Blue vessel wall
+]);
+
+// Or load from API response
+const response = await fetch('/api/mesh/LAD_lumen.mz3');
+const blob = await response.blob();
+const url = URL.createObjectURL(blob);
+await nv.loadMeshes([{ url, rgba255: [255, 0, 0, 200] }]);
+URL.revokeObjectURL(url);
+```
+
+---
+
+### Mesh Optimization for Web Performance
+
+**Target Metrics for Interactive Web Viewing:**
+- **File size:** <5 MB per mesh (MZ3 compressed)
+- **Triangle count:** 50K-200K triangles (balance quality/performance)
+- **Loading time:** <500ms per mesh
+- **Rendering:** 60 FPS on mid-range GPU
+
+**Optimization Pipeline:**
+```python
+# Backend: app/services/mesh_optimizer.py
+import trimesh
+import numpy as np
+
+def optimize_mesh_for_web(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    target_faces: int = 100_000,
+    smooth_iterations: int = 3
+) -> dict:
+    """
+    Optimize mesh for web viewing:
+    1. Decimate to target triangle count
+    2. Smooth to reduce faceting
+    3. Remove degenerate triangles
+    4. Compute normals for lighting
+    """
+    # Create trimesh object
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    
+    # 1. Decimate (reduce triangles)
+    if len(faces) > target_faces:
+        mesh = mesh.simplify_quadric_decimation(target_faces)
+    
+    # 2. Smooth (Laplacian)
+    trimesh.smoothing.filter_laplacian(
+        mesh,
+        iterations=smooth_iterations,
+        lamb=0.5  # Smoothing strength
+    )
+    
+    # 3. Clean up
+    mesh.remove_degenerate_faces()
+    mesh.remove_duplicate_faces()
+    mesh.remove_unreferenced_vertices()
+    
+    # 4. Compute normals
+    mesh.fix_normals()  # Ensure consistent winding
+    vertex_normals = mesh.vertex_normals
+    
+    return {
+        'vertices': mesh.vertices.flatten().tolist(),
+        'triangles': mesh.faces.flatten().tolist(),
+        'normals': vertex_normals.flatten().tolist(),
+        'stats': {
+            'num_vertices': len(mesh.vertices),
+            'num_triangles': len(mesh.faces),
+            'bounds': mesh.bounds.tolist(),
+            'volume_mm3': mesh.volume if mesh.is_watertight else None
+        }
+    }
+```
+
+---
+
+### Complete Integration Example
+
+**Scenario:** User clicks on coronary artery → AI segments → Display mesh in NiiVue
+
+**Frontend (TypeScript):**
+```typescript
+// services/meshWorkflow.ts
+import { Niivue } from '@niivue/niivue';
+import { apiClient } from './api';
+
+export async function segmentAndDisplayMesh(
+  nv: Niivue,
+  clickPoint: [number, number, number],
+  vesselName: string
+): Promise<void> {
+  
+  // Step 1: Request AI segmentation
+  const segResponse = await apiClient.post('/api/segment', {
+    point: clickPoint,
+    vessel: vesselName
+  });
+  
+  const segmentationId = segResponse.data.segmentation_id;
+  
+  // Step 2: Request mesh generation (MZ3 format)
+  const meshResponse = await apiClient.post('/api/mesh/from-segmentation', {
+    segmentation_id: segmentationId,
+    format: 'mz3',  // Fastest for web
+    reduction: 0.15,  // 15% of original triangles
+    smooth: 10
+  });
+  
+  // Step 3: Download mesh
+  const meshBlob = await fetch(meshResponse.data.mesh_url).then(r => r.blob());
+  const meshUrl = URL.createObjectURL(meshBlob);
+  
+  // Step 4: Load into NiiVue
+  await nv.loadMeshes([{
+    url: meshUrl,
+    rgba255: [255, 0, 0, 200],  // Red, semi-transparent
+    name: `${vesselName}_lumen`
+  }]);
+  
+  // Cleanup
+  URL.revokeObjectURL(meshUrl);
+  
+  console.log(`Mesh loaded: ${meshResponse.data.stats.num_triangles} triangles`);
+}
+
+// Usage
+const nv = new Niivue();
+await nv.attachToCanvas(document.getElementById('gl'));
+
+// User clicks on LAD
+const clickPoint: [number, number, number] = [120.5, 85.3, 42.1];
+await segmentAndDisplayMesh(nv, clickPoint, 'LAD');
+```
+
+**Backend (Python FastAPI):**
+```python
+# app/api/mesh.py
+from fastapi import APIRouter, BackgroundTasks
+from app.services.sam_med3d import segment_vessel
+from app.services.nii2mesh_wrapper import segmentation_to_mesh_nii2mesh
+from app.services.mesh_optimizer import optimize_mesh_for_web
+import nibabel as nib
+
+router = APIRouter()
+
+@router.post('/api/mesh/from-segmentation')
+async def create_mesh(
+    segmentation_id: str,
+    format: str = 'mz3',
+    reduction: float = 0.15,
+    smooth: int = 10
+):
+    """Generate optimized mesh from segmentation."""
+    
+    # Load segmentation mask
+    seg_path = f'/data/segmentations/{segmentation_id}.nii.gz'
+    seg_nii = nib.load(seg_path)
+    mask = seg_nii.get_fdata() > 0.5
+    
+    # Generate mesh with nii2mesh (high quality)
+    mesh_path = segmentation_to_mesh_nii2mesh(
+        mask,
+        seg_nii.affine,
+        output_format=format,
+        reduction=reduction,
+        smooth_iterations=smooth
+    )
+    
+    # Get mesh stats
+    import trimesh
+    mesh = trimesh.load(mesh_path)
+    
+    return {
+        'mesh_url': f'/static/meshes/{mesh_path.name}',
+        'stats': {
+            'num_vertices': len(mesh.vertices),
+            'num_triangles': len(mesh.faces),
+            'file_size_mb': mesh_path.stat().st_size / 1e6,
+            'format': format
+        }
+    }
+```
+
+---
+
+## 🚀 Recommended Workflow for Segment Platform
+
+**For Interactive Web Application:**
+
+1. **Fast Preview (Client-side):**
+   - Use vtk.js marching cubes for immediate feedback (<1s)
+   - Display low-poly mesh while high-quality mesh generates
+   - Good for user interaction and validation
+
+2. **High-Quality Export (Server-side):**
+   - Use nii2mesh with MZ3 output for final visualization
+   - Generate in background while user reviews preview
+   - Swap preview mesh with high-quality mesh when ready
+
+3. **Mesh Format Strategy:**
+   - **Primary:** MZ3 (smallest, fastest)
+   - **Export options:** PLY (3D software), STL (3D printing), VTK (analysis)
+   - **Avoid:** GIfTI (unless neuroimaging), OBJ (unless required)
+
+**Implementation Priority:**
+1. ✅ **Week 1-2:** Implement vtk.js marching cubes (fast preview)
+2. ✅ **Week 3-4:** Integrate nii2mesh backend (high quality)
+3. ✅ **Week 5-6:** Add MZ3 format support (optimal web performance)
+4. ✅ **Week 7-8:** Implement mesh optimization pipeline
+
+---
+
 ## 🧬 Centerline Extraction
 
 ### Current: MEDIS TXT Provides Centerline
@@ -1424,21 +2058,1246 @@ export async function extractCenterlineVoronoi(
 
 ---
 
-## 🛤️ Straightened MPR (Curved Reformation)
+## 🛤️ Straightened MPR (Curved Reformation) - Complete Algorithm
 
-### What is Straightened MPR?
+### Overview: Mathematical Foundation
 
-**Goal:** "Straighten" a curved coronary artery for easier visualization
-- **Input:** 3D CTA volume + vessel centerline
-- **Output:** Straightened 3D volume where centerline is straight
-- **Use case:** View entire curved LAD as if it were straight
+**Straightened MPR** (also called **Curved Planar Reformation - CPR**) is a visualization technique that "unfolds" a curved vessel into a straight view, enabling easier assessment of stenosis, plaque, and vessel wall abnormalities along the entire length.
 
+**Three Key Components:**
+1. **Centerline extraction** from MEDIS contour point clouds
+2. **Orthogonal cross-section extraction** at each centerline point
+3. **Volume reconstruction** by stacking cross-sections into straightened 3D volume
+
+**Mathematical Approach:** Frenet-Serret Frame (TNB frame)
+- **T** (Tangent): Direction of vessel at each point
+- **N** (Normal): Principal curvature direction
+- **B** (Binormal): T × N, completes right-handed coordinate system
+
+---
+
+## 📐 Algorithm 1: Centerline Extraction from MEDIS TXT
+
+### Input Data Format
+
+**MEDIS TXT structure** (from `C:\Users\steff\Documents\GitHub\flow\data\*.txt`):
+```
+# Contour index: 0
+# group: Lumen
+# SliceDistance: 0.25
+# Number of points: 50
+17.518342971801758 16.819992065429688 1967.189453125
+17.93111801147461 16.195648193359375 1967.219482421875
+...
+
+# Contour index: 1
+# group: VesselWall
+# SliceDistance: 0.25
+# Number of points: 49
+18.509117126464844 15.870161056518555 1966.8944091796875
+...
+```
+
+**Key observations:**
+- Each contour has fixed `SliceDistance` (spacing along vessel)
+- `Lumen` contours define inner wall (blood pool)
+- `VesselWall` contours define outer wall (including plaque)
+- Points are in 3D physical space (mm): `[x, y, z]`
+
+### Algorithm 1.1: Extract Centerline Points
+
+**Method: Centroid of Lumen Contours**
+
+```
+Input:
+  - lumen_contours: List of N lumen contours, each with M_i points
+  
+Output:
+  - centerline_points: Array of N points [x, y, z]
+  - slice_distances: Array of N distances along vessel
+
+Algorithm:
+  FOR each lumen_contour in lumen_contours:
+    // Compute centroid (geometric center)
+    centroid = [0, 0, 0]
+    FOR each point in lumen_contour.points:
+      centroid += point
+    centroid /= len(lumen_contour.points)
+    
+    centerline_points.append(centroid)
+    slice_distances.append(lumen_contour.SliceDistance)
+  
+  RETURN centerline_points, slice_distances
+```
+
+**Example:**
+```
+Contour 0 (50 lumen points) → Centroid: [15.2, 14.8, 1970.5]
+Contour 1 (48 lumen points) → Centroid: [15.1, 14.9, 1971.0]
+...
+→ Centerline: N points spaced by SliceDistance (typically 0.25-0.5 mm)
+```
+
+### Algorithm 1.2: Compute Tangent Vectors (T)
+
+**Method: Finite Differences**
+
+```
+Input:
+  - centerline_points: Array of N points [x, y, z]
+  
+Output:
+  - tangents: Array of N normalized direction vectors
+
+Algorithm:
+  tangents = []
+  
+  FOR i = 0 to N-1:
+    IF i == 0:
+      // Forward difference at start
+      tangent = centerline_points[1] - centerline_points[0]
+    ELSE IF i == N-1:
+      // Backward difference at end
+      tangent = centerline_points[i] - centerline_points[i-1]
+    ELSE:
+      // Central difference (more accurate)
+      tangent = centerline_points[i+1] - centerline_points[i-1]
+    
+    // Normalize to unit vector
+    length = ||tangent||
+    tangent = tangent / length
+    
+    tangents.append(tangent)
+  
+  RETURN tangents
+```
+
+**Why central difference?**
+- More accurate approximation of derivative
+- Symmetric → reduces bias
+- Standard in numerical differentiation
+
+### Algorithm 1.3: Compute Normal and Binormal Vectors (N, B)
+
+**Method: Frenet-Serret Frame Construction**
+
+```
+Input:
+  - tangents: Array of N tangent vectors T
+  
+Output:
+  - normals: Array of N normal vectors N
+  - binormals: Array of N binormal vectors B
+
+Algorithm:
+  normals = []
+  binormals = []
+  
+  FOR i = 0 to N-1:
+    T = tangents[i]
+    
+    // Step 1: Compute curvature vector (dT/ds)
+    IF i == 0:
+      dT = tangents[1] - tangents[0]
+    ELSE IF i == N-1:
+      dT = tangents[i] - tangents[i-1]
+    ELSE:
+      dT = tangents[i+1] - tangents[i-1]
+    
+    // Step 2: Normal is normalized curvature direction
+    curvature_magnitude = ||dT||
+    IF curvature_magnitude > epsilon:
+      N = dT / curvature_magnitude
+    ELSE:
+      // Straight segment: choose arbitrary perpendicular
+      N = perpendicular_to(T)
+    
+    // Step 3: Binormal via cross product (right-handed system)
+    B = cross_product(T, N)
+    B = normalize(B)
+    
+    normals.append(N)
+    binormals.append(B)
+  
+  RETURN normals, binormals
+
+// Helper: Find arbitrary perpendicular vector
+FUNCTION perpendicular_to(v):
+  // Choose axis least aligned with v
+  IF abs(v.x) < abs(v.y) AND abs(v.x) < abs(v.z):
+    axis = [1, 0, 0]
+  ELSE IF abs(v.y) < abs(v.z):
+    axis = [0, 1, 0]
+  ELSE:
+    axis = [0, 0, 1]
+  
+  // Cross product gives perpendicular
+  perp = cross_product(v, axis)
+  RETURN normalize(perp)
+```
+
+**Frenet-Serret Frame Properties:**
+- **Orthogonal**: T ⊥ N, T ⊥ B, N ⊥ B
+- **Right-handed**: B = T × N
+- **Unit vectors**: ||T|| = ||N|| = ||B|| = 1
+
+---
+
+## 🔬 Algorithm 2: Perpendicular Cross-Section Extraction
+
+### Goal
+Extract a 2D cross-sectional image perpendicular to the vessel centerline at each point.
+
+### Mathematical Setup
+
+**Local Coordinate System at point P:**
+- **Origin**: Centerline point P = [px, py, pz]
+- **u-axis**: Normal vector N (horizontal in cross-section)
+- **v-axis**: Binormal vector B (vertical in cross-section)  
+- **w-axis**: Tangent vector T (perpendicular to cross-section)
+
+**Cross-section plane equation:**
+```
+Any point Q in the plane satisfies: dot(Q - P, T) = 0
+Parametric form: Q(u, v) = P + u*N + v*B
+  where u ∈ [-size_u/2, +size_u/2]
+        v ∈ [-size_v/2, +size_v/2]
+```
+
+### Algorithm 2.1: Sample Cross-Section Grid
+
+```
+Input:
+  - cta_volume: 3D volume data (NIfTI format)
+  - cta_affine: 4×4 affine matrix (voxel → physical space)
+  - centerline_point: [px, py, pz] in mm
+  - normal: N vector (unit)
+  - binormal: B vector (unit)
+  - tangent: T vector (unit)
+  - cross_section_size: [width, height] in pixels (e.g., [64, 64])
+  - cross_section_spacing: [du, dv] in mm (e.g., [0.5, 0.5])
+  
+Output:
+  - cross_section_image: 2D array [width × height]
+
+Algorithm:
+  P = centerline_point
+  [W, H] = cross_section_size
+  [du, dv] = cross_section_spacing
+  
+  cross_section_image = zeros(W, H)
+  
+  // Sample grid in (u,v) coordinates
+  FOR iu = 0 to W-1:
+    FOR iv = 0 to H-1:
+      // Convert pixel indices to physical offsets
+      u = (iu - W/2) * du  // Center at origin
+      v = (iv - H/2) * dv
+      
+      // Compute 3D physical position
+      Q_physical = P + u*N + v*B
+      
+      // Transform to voxel coordinates
+      Q_voxel = world_to_voxel(Q_physical, cta_affine)
+      
+      // Interpolate intensity at Q_voxel
+      intensity = trilinear_interpolate(cta_volume, Q_voxel)
+      
+      cross_section_image[iu, iv] = intensity
+  
+  RETURN cross_section_image
+```
+
+### Algorithm 2.2: Trilinear Interpolation
+
+**Purpose:** Sample CTA volume at non-integer voxel coordinates
+
+```
+Input:
+  - volume: 3D array [Nx × Ny × Nz]
+  - position: [x, y, z] in voxel coordinates (can be fractional)
+  
+Output:
+  - intensity: Interpolated value
+
+Algorithm:
+  [x, y, z] = position
+  
+  // Floor and fractional parts
+  x0 = floor(x);  x1 = x0 + 1;  fx = x - x0
+  y0 = floor(y);  y1 = y0 + 1;  fy = y - y0
+  z0 = floor(z);  z1 = z0 + 1;  fz = z - z0
+  
+  // Bounds check (return 0 if out of bounds)
+  IF x0 < 0 OR x1 >= Nx OR y0 < 0 OR y1 >= Ny OR z0 < 0 OR z1 >= Nz:
+    RETURN 0  // Background value
+  
+  // Sample 8 corner voxels
+  c000 = volume[x0, y0, z0]
+  c001 = volume[x0, y0, z1]
+  c010 = volume[x0, y1, z0]
+  c011 = volume[x0, y1, z1]
+  c100 = volume[x1, y0, z0]
+  c101 = volume[x1, y0, z1]
+  c110 = volume[x1, y1, z0]
+  c111 = volume[x1, y1, z1]
+  
+  // Trilinear interpolation
+  c00 = c000*(1-fx) + c100*fx
+  c01 = c001*(1-fx) + c101*fx
+  c10 = c010*(1-fx) + c110*fx
+  c11 = c011*(1-fx) + c111*fx
+  
+  c0 = c00*(1-fy) + c10*fy
+  c1 = c01*(1-fy) + c11*fy
+  
+  intensity = c0*(1-fz) + c1*fz
+  
+  RETURN intensity
+```
+
+---
+
+## 🎞️ Algorithm 3: Straightened MPR Volume Construction
+
+### Goal
+Create a 3D volume where the vessel appears straight, with the centerline running along one axis.
+
+### Volume Layout
+
+```
+Straightened Volume Dimensions: [W, H, D]
+  - W: Width of cross-section (e.g., 64 pixels)
+  - H: Height of cross-section (e.g., 64 pixels)
+  - D: Depth = number of centerline points (e.g., 200 slices)
+
+Voxel coordinates:
+  - (u, v, d) where:
+    * u ∈ [0, W-1]: Horizontal in cross-section
+    * v ∈ [0, H-1]: Vertical in cross-section
+    * d ∈ [0, D-1]: Along straightened centerline
+```
+
+### Algorithm 3.1: Build Straightened Volume
+
+```
+Input:
+  - cta_volume: Original 3D CTA volume
+  - cta_affine: Affine transformation matrix
+  - centerline_points: Array of N points
+  - normals: Array of N normal vectors
+  - binormals: Array of N binormal vectors
+  - tangents: Array of N tangent vectors
+  - cross_section_size: [W, H] pixels
+  - cross_section_spacing: [du, dv] mm
+  
+Output:
+  - straightened_volume: 3D array [W × H × N]
+  - straightened_affine: New affine matrix
+
+Algorithm:
+  [W, H] = cross_section_size
+  N = len(centerline_points)
+  
+  straightened_volume = zeros(W, H, N)
+  
+  // Extract cross-section at each centerline point
+  FOR d = 0 to N-1:
+    P = centerline_points[d]
+    N_vec = normals[d]
+    B_vec = binormals[d]
+    T_vec = tangents[d]
+    
+    cross_section = extract_cross_section(
+      cta_volume, cta_affine,
+      P, N_vec, B_vec, T_vec,
+      cross_section_size,
+      cross_section_spacing
+    )
+    
+    straightened_volume[:, :, d] = cross_section
+  
+  // Construct affine matrix for straightened volume
+  straightened_affine = build_straightened_affine(
+    cross_section_spacing,
+    slice_spacing  // Spacing along centerline
+  )
+  
+  RETURN straightened_volume, straightened_affine
+```
+
+### Algorithm 3.2: Straightened Affine Matrix
+
+**Purpose:** Define voxel-to-physical-space mapping for straightened volume
+
+```
+Algorithm:
+  [du, dv] = cross_section_spacing
+  ds = slice_spacing  // Typically mean distance between centerline points
+  
+  // Identity-based affine (straightened coordinate system)
+  affine = [
+    [du,  0,  0,  -W*du/2],  // u-axis (horizontal)
+    [ 0, dv,  0,  -H*dv/2],  // v-axis (vertical)
+    [ 0,  0, ds,          0],  // d-axis (along centerline)
+    [ 0,  0,  0,          1]   // Homogeneous
+  ]
+  
+  RETURN affine
+```
+
+**Note:** Origin at center of first cross-section, straightened along z-axis
+
+---
+
+## 🎮 Algorithm 4: Interactive Viewing Angle Controls
+
+### Problem
+Users need to adjust the viewing orientation of cross-sections and straightened MPR to:
+1. **Rotate cross-section** around vessel axis (change N, B orientation)
+2. **Tilt straightened MPR** to view from different angles
+3. **Slide along centerline** to inspect specific locations
+
+### Algorithm 4.1: Rotate Cross-Section Around Tangent
+
+**Purpose:** Rotate N and B vectors around T by angle θ
+
+```
+Input:
+  - normal: N vector (original)
+  - binormal: B vector (original)
+  - tangent: T vector (axis of rotation)
+  - theta: Rotation angle in radians
+  
+Output:
+  - normal_rotated: New N' vector
+  - binormal_rotated: New B' vector
+
+Algorithm (Rodrigues' rotation formula):
+  // Rotate N around T by theta
+  N' = N*cos(theta) + (T × N)*sin(theta) + T*(T·N)*(1 - cos(theta))
+  
+  // Rotate B around T by theta
+  B' = B*cos(theta) + (T × B)*sin(theta) + T*(T·B)*(1 - cos(theta))
+  
+  // Simplification: Since N ⊥ T and B ⊥ T:
+  //   T·N = 0, T·B = 0
+  // So:
+  N' = N*cos(theta) + (T × N)*sin(theta)
+  B' = B*cos(theta) + (T × B)*sin(theta)
+  
+  // Alternative using rotation matrix:
+  R = rotation_matrix_axis_angle(T, theta)
+  N' = R * N
+  B' = R * B
+  
+  RETURN N', B'
+
+// Helper: Rotation matrix for axis-angle rotation
+FUNCTION rotation_matrix_axis_angle(axis, theta):
+  [x, y, z] = normalize(axis)
+  c = cos(theta)
+  s = sin(theta)
+  t = 1 - c
+  
+  R = [
+    [t*x*x + c,    t*x*y - z*s,  t*x*z + y*s],
+    [t*x*y + z*s,  t*y*y + c,    t*y*z - x*s],
+    [t*x*z - y*s,  t*y*z + x*s,  t*z*z + c  ]
+  ]
+  
+  RETURN R
+```
+
+### Algorithm 4.2: UI Control Mapping
+
+**Control Panel (Right Pane):**
+
+```
+Cross-Section Controls:
+  [Slider] Centerline Position: 0 ──────●── N-1
+           → Selects which cross-section to display
+           → Updates position marker on centerline overlay
+  
+  [Slider] Rotation Angle: -180° ──●── +180°
+           → Rotates N, B around T (vessel axis)
+           → Recomputes cross-section on-the-fly
+  
+  [Slider] Zoom: 0.5× ──●── 4.0×
+           → Adjusts cross_section_size (field of view)
+  
+  [Button] Reset View
+           → theta = 0, zoom = 1.0
+
+Straightened MPR Controls:
+  [Slider] Viewing Angle: 0° ──●── 360°
+           → Rotates MPR volume around long axis
+           → For multi-planar views
+  
+  [Toggle] Curved vs. Straightened
+           → Switch between CPR modes
+  
+  [Slider] Window/Level (HU)
+           → Adjust contrast for plaque visibility
+
+Mesh Display:
+  [Checkbox] Show Lumen Mesh
+  [Checkbox] Show Vessel Wall Mesh
+  [Slider] Mesh Opacity: 0% ──●── 100%
+```
+
+---
+
+## 🖼️ Algorithm 5: Quad-View Layout Integration
+
+### Layout Design (Inspired by Frac 4-Panel)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  [Logo] Segment    [Load NII] [Load TXT] [⚙️] [👤] [◫ Layout]│
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  ┌──────────────────┐ ┌──────────────────┐  ┌─────────────┐ │
+│  │                  │ │                  │  │  Controls   │ │
+│  │  Panel 1:        │ │  Panel 2:        │  │             │ │
+│  │  Original CTA    │ │  Cross-Section   │  │ ┌─────────┐ │ │
+│  │  (Axial/MPR)     │ │  MPR (⊥ vessel)  │  │ │Position │ │ │
+│  │                  │ │                  │  │ │ [Slider]│ │ │
+│  │  + Centerline    │ │  + Current       │  │ │         │ │ │
+│  │    overlay       │ │    position      │  │ │Rotation │ │ │
+│  │                  │ │    marker        │  │ │ [Slider]│ │ │
+│  └──────────────────┘ └──────────────────┘  │ │         │ │ │
+│                                              │ │Zoom     │ │ │
+│  ┌──────────────────┐ ┌──────────────────┐  │ │ [Slider]│ │ │
+│  │                  │ │                  │  │ │         │ │ │
+│  │  Panel 3:        │ │  Panel 4:        │  │ │[Reset]  │ │ │
+│  │  Straightened    │ │  3D Mesh         │  │ └─────────┘ │ │
+│  │  MPR (Vessel     │ │  Visualization   │  │             │ │
+│  │  unfolded)       │ │                  │  │ Mesh        │ │
+│  │                  │ │  + Lumen (red)   │  │ ┌─────────┐ │ │
+│  │  + Plaque        │ │  + Vessel wall   │  │ │☑ Lumen  │ │ │
+│  │    visible       │ │    (blue)        │  │ │☑ Vessel │ │ │
+│  │                  │ │  + Rotatable     │  │ │Opacity  │ │ │
+│  └──────────────────┘ └──────────────────┘  └─────────────┘ │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Panel-Specific Algorithms
+
+**Panel 1: Original CTA + Centerline Overlay**
+```
+Display:
+  - Load NIfTI CTA volume into NiiVue
+  - Parse MEDIS TXT → extract centerline
+  - Render centerline as 3D polyline overlay (yellow)
+  - Allow user to click on centerline → jump to that position
+```
+
+**Panel 2: Cross-Section MPR**
+```
+Display:
+  - Extract perpendicular cross-section at current position
+  - Show as 2D image with vessel lumen in center
+  - Overlay: Contour outlines (lumen=red, vessel=blue)
+  - Updates in real-time when sliders change
+```
+
+**Panel 3: Straightened MPR**
+```
+Display:
+  - Show straightened volume as 2D image (sagittal-like view)
+  - Vertical axis = along centerline
+  - Horizontal axis = cross-section width
+  - Plaque and stenosis visible as intensity changes
+```
+
+**Panel 4: 3D Mesh Visualization**
+```
+Display:
+  - Load STL meshes generated from buildstl.py
+  - Lumen mesh (red, semi-transparent)
+  - Vessel wall mesh (blue, more transparent)
+  - Interactive rotation/zoom with mouse
+```
+
+---
+
+## 🔄 Complete Workflow: Data Flow
+
+### Step-by-Step Execution
+
+```
+1. USER LOADS DATA
+   ├─ Load CTA volume (NIfTI): patient_001.nii.gz
+   └─ Load MEDIS TXT: patient_001_lad.txt
+
+2. PARSE MEDIS TXT
+   ├─ Extract lumen contours (N rings of M points each)
+   ├─ Extract vessel wall contours
+   └─ Extract slice distances
+
+3. COMPUTE CENTERLINE (Algorithm 1)
+   ├─ Centroid of each lumen contour → N centerline points
+   ├─ Finite differences → tangent vectors T
+   └─ Frenet-Serret → normal N and binormal B vectors
+
+4. GENERATE MESHES (Existing: buildstl.py)
+   ├─ Lumen tube mesh (STL)
+   └─ Vessel wall tube mesh (STL)
+
+5. EXTRACT CROSS-SECTIONS (Algorithm 2)
+   ├─ For each centerline point:
+   │  ├─ Define perpendicular plane (N, B basis)
+   │  ├─ Sample CTA volume on 64×64 grid
+   │  └─ Store as 2D image
+   └─ Current position controlled by slider
+
+6. BUILD STRAIGHTENED MPR (Algorithm 3)
+   ├─ Stack all cross-sections along z-axis
+   ├─ Result: [64 × 64 × N] volume
+   └─ Save as NIfTI for visualization
+
+7. DISPLAY QUAD-VIEW (Algorithm 5)
+   ├─ Panel 1: CTA + centerline overlay
+   ├─ Panel 2: Current cross-section (interactive)
+   ├─ Panel 3: Straightened MPR
+   └─ Panel 4: 3D mesh (lumen + vessel wall)
+
+8. USER INTERACTION (Algorithm 4)
+   ├─ Slider: Move along centerline → update Panel 2
+   ├─ Slider: Rotate cross-section → recompute Panel 2
+   ├─ Slider: Viewing angle → rotate Panel 3
+   └─ Toggle: Show/hide meshes in Panel 4
+```
+
+---
+
+## 🎯 Implementation Priorities (No Coding Yet)
+
+### Phase 1: Core Algorithms (Backend)
+1. **Centerline extraction** from MEDIS TXT (Algorithm 1)
+2. **Frenet-Serret frame** computation (Algorithm 1.3)
+3. **Cross-section sampling** with trilinear interpolation (Algorithm 2)
+4. **Straightened volume construction** (Algorithm 3)
+
+### Phase 2: Visualization (Frontend)
+1. **NiiVue integration** for CTA volume display
+2. **Cross-section viewer** with real-time updates
+3. **Straightened MPR viewer**
+4. **STL mesh overlay** (already have meshes from buildstl.py)
+
+### Phase 3: Interactivity (Frontend)
+1. **Slider controls** for position/rotation/zoom
+2. **Synchronized views** (click in Panel 1 → update Panel 2)
+3. **Mouse interaction** for 3D mesh rotation
+4. **Export functionality** (save straightened NIfTI, screenshots)
+
+### Phase 4: Optimization
+1. **GPU acceleration** for real-time cross-section extraction
+2. **Caching** of computed cross-sections
+3. **Progressive loading** for large datasets
+4. **WebGL shaders** for fast interpolation
+
+---
+
+## 🔬 Mathematical Notes & Challenges
+
+### Challenge 1: Handling Vessel Bifurcations
+**Problem:** Centerline branches (e.g., LAD → diagonal branch)
+**Solution:** 
+- Detect branches in MEDIS contours (sudden topology change)
+- Split into separate centerlines
+- Process each branch independently
+- Allow user to select which branch to view
+
+### Challenge 2: Rotation Angle Ambiguity
+**Problem:** Arbitrary initial orientation of N, B
+**Solution:**
+- Use consistent reference frame (e.g., align N with "superior" direction)
+- Allow user to set reference angle
+- Maintain smooth transitions along centerline (minimize twist)
+
+### Challenge 3: Variable Spacing
+**Problem:** Centerline points may have non-uniform spacing
+**Solution:**
+- Resample centerline to uniform spacing (e.g., 0.5mm)
+- Use arc-length parametrization
+- Cubic spline interpolation for smooth curve
+
+### Challenge 4: Out-of-Bounds Sampling
+**Problem:** Cross-section may extend beyond CTA volume
+**Solution:**
+- Return 0 (air) for out-of-bounds voxels
+- Clip cross-section to volume bounds
+- Warn user if >20% of cross-section is out-of-bounds
+
+---
+
+## 💡 Future Enhancements
+
+### Voxel-Based Approach (Alternative to Point Clouds)
+**When:** If MEDIS TXT not available, or for automatic processing
 **Method:**
-1. Walk along centerline (parametric curve)
-2. At each centerline point, extract perpendicular cross-section slice
-3. Resample slice at consistent resolution
-4. Stack slices to create straightened 3D volume
-5. Save as NIfTI.gz for visualization
+1. Segmentation mask (SAM-Med3D) → binary volume
+2. Voronoi skeletonization → centerline
+3. Distance transform → vessel radius at each point
+4. Same Frenet-Serret pipeline → cross-sections
+
+**Advantage:** Fully automatic, no manual contours needed
+
+### Advanced CPR Modes
+1. **Stretched CPR:** Preserve vessel length (no compression at curves)
+2. **Projected CPR:** Maximum intensity projection along curved plane
+3. **Multi-path CPR:** Simultaneous display of multiple branches
+
+### Quantitative Analysis
+1. **Stenosis detection:** Measure minimum lumen diameter
+2. **Plaque burden:** Compare lumen vs. vessel wall areas
+3. **Remodeling index:** Vessel wall area / lumen area
+4. **Calcium scoring:** Integrate HU values in wall
+
+---
+
+## 📏 Technical Specifications
+
+### Performance Targets
+- **Centerline extraction:** <100ms for 200-point centerline
+- **Single cross-section:** <10ms (real-time slider interaction)
+- **Straightened MPR generation:** <2s for full volume
+- **Mesh generation:** Already fast with buildstl.py (<50ms)
+
+### Memory Requirements
+- **CTA volume:** ~200 MB (512×512×300 × 2 bytes)
+- **Straightened volume:** ~8 MB (64×64×200 × 2 bytes)
+- **Meshes:** <5 MB per vessel (STL format)
+- **Total:** ~300 MB per case (reasonable for modern browsers)
+
+### Accuracy Considerations
+- **Centerline:** ±0.5mm (limited by contour spacing)
+- **Cross-section orientation:** ±2° (Frenet-Serret numerical stability)
+- **Interpolation error:** <2 HU (trilinear interpolation quality)
+- **Sufficient** for clinical visualization and qualitative assessment
+
+---
+
+---
+
+## 🔄 Optional: General Volume Viewer with Free Rotation
+
+### Overview
+
+**Separate from vessel-specific tools**, the platform includes a **general-purpose 3D volume viewer** with **free rotation capabilities**. This is based on the existing `viewer.py` implementation (`C:\Users\steff\Documents\GitHub\allerlei\old\viewer.py`) and provides unrestricted viewing angles for any NIfTI volume.
+
+**Use Cases:**
+- General CTA volume inspection without vessel-specific constraints
+- Quality control and data verification
+- Free exploration before starting vessel analysis
+- Educational demonstrations
+- Multi-modality volume viewing (MRI, CT, PET, etc.)
+
+**Key Feature:** **Interactive mouse-drag rotation** with real-time volume resampling
+
+---
+
+### Mathematical Foundation: 3D Rotation System
+
+**Based on:** Rodrigues' rotation formula + Euler angles
+
+#### Rotation Matrix from Axis-Angle
+
+**Rodrigues' Formula:**
+```
+Given: axis n (unit vector), angle θ (radians)
+Rotation matrix R:
+
+R = I*cos(θ) + (1 - cos(θ))*n*n^T + [n]_×*sin(θ)
+
+Where [n]_× is the cross-product matrix:
+[n]_× = [  0   -n_z   n_y ]
+        [ n_z    0   -n_x ]
+        [-n_y   n_x    0  ]
+```
+
+**Implementation (from viewer.py):**
+```python
+def cross_product_matrix(v):
+    return np.array([
+        [0.0,  -v[2],  v[1]],
+        [v[2],   0.0, -v[0]],
+        [-v[1],  v[0],  0.0]
+    ])
+
+def matrix_from_axis_angle(n, theta):
+    """
+    Rodrigues' rotation formula implementation.
+    
+    Args:
+        n: Unit axis vector [x, y, z]
+        theta: Rotation angle in radians
+    
+    Returns:
+        3×3 rotation matrix
+    """
+    return (
+        np.eye(3) * np.cos(theta) + 
+        (1.0 - np.cos(theta)) * n[:,np.newaxis].dot(n[np.newaxis,:]) + 
+        cross_product_matrix(n) * np.sin(theta)
+    )
+```
+
+#### Euler Angles Extraction
+
+**Purpose:** Convert rotation matrix back to Euler angles (X-Y-Z convention) for display/storage
+
+```python
+def euler_from_matrix(R):
+    """
+    Extract Euler angles from rotation matrix.
+    Convention: Rotate around Z, then Y, then X (extrinsic)
+    
+    Returns:
+        [angle_x, angle_y, angle_z] in radians, range (-π, π]
+    """
+    if np.abs(R[2, 0]) != 1.0:
+        # General case: two solutions exist
+        angle2 = np.arcsin(R[2, 0])
+        angle3 = np.arctan2(-R[2, 1] / np.cos(angle2), R[2, 2] / np.cos(angle2))
+        angle1 = np.arctan2(-R[1, 0] / np.cos(angle2), R[0, 0] / np.cos(angle2))
+    else:
+        # Gimbal lock case
+        if R[2, 0] == 1.0:
+            angle3 = 0.0
+            angle2 = np.pi / 2.0
+            angle1 = np.arctan2(R[0, 1], -R[0, 2])
+        else:
+            angle3 = 0.0
+            angle2 = -np.pi / 2.0
+            angle1 = np.arctan2(R[0, 1], R[0, 2])
+    
+    return -np.array([angle1, angle2, angle3])[::-1]
+```
+
+---
+
+### Interactive Mouse Drag Rotation Algorithm
+
+**Goal:** Rotate volume in real-time as user drags mouse across viewing panel
+
+**Mouse Drag Event Handling:**
+```python
+def mouseDragEvent(self, ev):
+    """
+    Drag mode 0: Free rotation mode
+    
+    Algorithm:
+    1. Compute drag angle in viewing plane
+    2. Rotation axis = normal to current view (perpendicular to screen)
+    3. Apply in-plane rotation around this axis
+    4. Update global rotation matrix
+    5. Resample and redisplay all views
+    """
+    pos, lastPos = ev.pos(), ev.lastPos()
+    
+    if Viewer.dragmode == 0:  # Rotation mode
+        # Center of view
+        c = pg.Point(self.boundingRect().center())
+        
+        # Compute angle between lastPos→center→pos
+        # Positive angle = counterclockwise in view
+        radinplane = angle(pos, c, lastPos) * (1 if self.spositive else -1)
+        
+        # Normalize view normal (perpendicular to screen)
+        self.normal = self.normal / np.linalg.norm(self.normal)
+        
+        # Create rotation matrix for in-plane rotation
+        rinplane = matrix_from_axis_angle(self.normal, radinplane)
+        
+        # Compose with existing rotation
+        rnew = rinplane.dot(Viewer.R)
+        
+        # Extract Euler angles for display
+        radnew = euler_from_matrix(rnew)  # In radians
+        Viewer.eulerxyz = np.degrees(radnew).tolist()
+        Viewer.R = rnew
+        
+        # Update all view normals
+        for view in Viewer.instances:
+            view.normal = rinplane.dot(view.normal)
+        
+        # Resample and redisplay
+        Viewer.update_all()
+```
+
+**Angle Computation:**
+```python
+def angle(p0, p1, p2):
+    """
+    Compute signed angle p0-p1-p2 in 2D plane.
+    
+    Args:
+        p0: Mouse position (current)
+        p1: Center of view (pivot)
+        p2: Mouse position (previous)
+    
+    Returns:
+        Signed angle in radians (-π to π)
+    """
+    v0 = np.array(p0) - np.array(p1)  # Vector to current pos
+    v1 = np.array(p2) - np.array(p1)  # Vector to last pos
+    
+    # atan2(cross, dot) gives signed angle
+    return math.atan2(np.linalg.det([v0, v1]), np.dot(v0, v1))
+```
+
+---
+
+### Three-Panel Orthogonal View System
+
+**Layout:** YZ (sagittal), XZ (coronal), XY (axial) views simultaneously
+
+```
+┌──────────────────────────────────────────────┐
+│  YZ View (Sagittal)  │  XZ View (Coronal)    │
+│  Slice through       │  Slice through        │
+│  fixed X position    │  fixed Y position     │
+├──────────────────────┴───────────────────────┤
+│  XY View (Axial)                             │
+│  Slice through fixed Z position              │
+└──────────────────────────────────────────────┘
+```
+
+**Key Feature:** All three views rotate together when dragging on any panel
+
+**View Initialization:**
+```python
+# View orientations (from viewer.py)
+# Format: [x_orient, y_orient, z_orient, rot_dir, sign]
+o_lps = [
+    [1,  1,  1, -1, 1],  # YZ view (sagittal)
+    [1,  1,  1,  1, 1],  # XZ view (coronal)
+    [1, -1,  1,  1, 1]   # XY view (axial)
+]
+
+# Create three SliceBox instances
+Viewer.instances = [
+    SliceBox(grid, axis=0, orient=o_lps[0], name='slice0'),  # YZ
+    SliceBox(grid, axis=1, orient=o_lps[1], name='slice1'),  # XZ
+    SliceBox(grid, axis=2, orient=o_lps[2], name='slice2')   # XY
+]
+```
+
+---
+
+### Volume Resampling with Rotation
+
+**After each rotation**, the volume must be resampled to show the rotated view:
+
+```python
+def update_image(grid, image, i, size, axis, interpolator, 
+                 levels, zvalue, compmode, lut, resample, item, defaultval, layer):
+    """
+    Resample rotated volume for display in one view.
+    
+    Steps:
+    1. Define slice plane perpendicular to view axis
+    2. Apply rotation transform
+    3. Trilinear interpolation at slice positions
+    4. Display as 2D image
+    """
+    # Set background value for out-of-bounds
+    resample.SetDefaultPixelValue(defaultval)
+    item.setZValue(zvalue)
+    
+    # Create coordinate slice (defines sampling plane)
+    coord_slice = make_slice(image, grid, i, axis)
+    
+    # Set as reference for resampling
+    resample.SetReferenceImage(coord_slice)
+    
+    # Execute resampling with rotation
+    b = np.squeeze(sitk.GetArrayFromImage(
+        resample.Execute(image)
+    )).astype(np.float32)
+    
+    # Handle window/level and NaN for overlays
+    if layer > 0 and layer < 9:
+        b[b < levels[0]] = np.nan
+        b[b > levels[1]] = np.nan
+    
+    # Display
+    item.setImage(b, lut=lut, levels=levels, compositionMode=compmode)
+    
+    return coord_slice
+```
+
+---
+
+### Drag Modes
+
+The viewer supports **three drag modes** (toggle with keyboard):
+
+**Mode 0: Rotation (Default)**
+- Drag mouse → rotate volume around view normal
+- All three views update simultaneously
+- Rotation matrix accumulated over multiple drags
+
+**Mode 1: Paint/Label**
+- Drag to paint segmentation mask
+- Used for manual corrections
+- Requires label layer active (F5 to create)
+
+**Mode 2: Window/Level Adjustment**
+- Horizontal drag → adjust window (contrast width)
+- Vertical drag → adjust level (brightness center)
+- Real-time HU value adjustment
+
+**Toggle:** Press `Space` to cycle through modes
+
+---
+
+### Keyboard Controls
+
+**From viewer.py implementation:**
+
+```
+Navigation:
+  ↑/↓           : Move slice up/down in current view
+  ←/→           : Navigate through time/volume dimension
+  Mouse Wheel   : Scroll through slices
+  Space         : Toggle drag mode (rotate/paint/window-level)
+
+Rotation:
+  Mouse Drag    : Free rotation (when in rotation mode)
+  S             : Save current rotation matrix to file
+  F2/F3/F4      : Flip X/Y/Z axes
+
+View:
+  F7            : Toggle click/drag modes
+  F8            : Set drag mode to window/level adjustment
+  O             : Play through slices (cine mode)
+  A             : Animate through volumes
+
+Export:
+  P             : Save screenshot (PNG)
+  Q             : Save animated GIF sequence
+
+Other:
+  F1            : Show help
+  F12           : Exit viewer
+  R             : Reload settings from config
+```
+
+---
+
+### Integration into Segment Platform
+
+**Navbar Button:** Add "General Viewer" option
+
+```
+Top Navbar:
+┌─────────────────────────────────────────────────────────────────┐
+│ [Segment Logo] [Load CTA] [Load MEDIS] [🔬 Vessel Tool] [🔄 General Viewer] │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Workflow:**
+1. User clicks **[🔄 General Viewer]** button
+2. Opens separate viewer window/modal
+3. Loads current CTA volume
+4. Enables free rotation with mouse drag
+5. No vessel-specific constraints
+6. Can return to vessel tool anytime
+
+**Use Cases:**
+- **Quality check:** Inspect CTA volume for artifacts, motion, noise
+- **Orientation:** Get familiar with anatomy before vessel tracing
+- **Teaching:** Demonstrate 3D cardiac anatomy
+- **General viewing:** Any NIfTI volume (not just CTA)
+
+---
+
+### Technical Implementation Options
+
+**Option A: Separate Window (Desktop-like)**
+```typescript
+// Frontend: Open general viewer in new window
+function openGeneralViewer(volume: NVImage) {
+  const viewerWindow = window.open(
+    '/viewer',
+    'GeneralViewer',
+    'width=1200,height=800'
+  );
+  
+  viewerWindow.postMessage({
+    type: 'loadVolume',
+    volume: volume.url
+  }, '*');
+}
+```
+
+**Option B: Modal Overlay**
+```typescript
+// Frontend: Show viewer as full-screen modal
+function showGeneralViewerModal(volume: NVImage) {
+  const modal = document.getElementById('general-viewer-modal');
+  modal.style.display = 'block';
+  
+  // Initialize PyQtGraph-like viewer in canvas
+  initializeRotatableViewer(modal, volume);
+}
+```
+
+**Option C: Side Panel Toggle**
+```typescript
+// Frontend: Replace right panel with viewer
+function toggleGeneralViewerPanel() {
+  const vesselPanel = document.getElementById('vessel-controls');
+  const viewerPanel = document.getElementById('general-viewer');
+  
+  vesselPanel.style.display = 'none';
+  viewerPanel.style.display = 'block';
+  
+  // Enable rotation mode
+  nv.setRotationMode(true);
+}
+```
+
+**Recommended:** Option A (separate window) for desktop-like experience
+
+---
+
+### Rotation State Management
+
+**Save/Load Rotation:**
+```python
+# Save rotation state to file (viewer.py: Key 'S')
+def save_rotation_state():
+    """
+    Save current rotation for reproducibility.
+    Format: [center_x, center_y, center_z, R_11, R_12, ..., R_33, 
+             euler_x, euler_y, euler_z]
+    """
+    state = np.array([])
+    state = np.append(state, Viewer.C)           # Center point
+    state = np.append(state, Viewer.R.flatten()) # Rotation matrix
+    state = np.append(state, Viewer.eulerxyz)    # Euler angles (degrees)
+    
+    np.savetxt('rotation_state.txt', state, fmt='%.6f')
+    
+    return {
+        'center': Viewer.C,
+        'rotation_matrix': Viewer.R.tolist(),
+        'euler_angles_deg': Viewer.eulerxyz
+    }
+```
+
+**Apply Saved Rotation:**
+```python
+def load_rotation_state(state_file):
+    """Load and apply saved rotation state."""
+    state = np.loadtxt(state_file)
+    
+    Viewer.C = state[:3]                    # Center
+    Viewer.R = state[3:12].reshape((3, 3))  # Rotation matrix
+    Viewer.eulerxyz = state[12:15].tolist() # Euler angles
+    
+    # Update all views
+    Viewer.update_all()
+```
+
+---
+
+### Performance Considerations
+
+**Real-time Requirements:**
+- **Target:** 30-60 FPS during rotation
+- **Challenge:** Trilinear interpolation for entire volume per frame
+
+**Optimization Strategies:**
+1. **Reduce resolution:** Downsample during rotation, full-res on release
+2. **GPU acceleration:** WebGL shaders for interpolation
+3. **Level of Detail (LOD):** Coarser sampling when rotating fast
+4. **Caching:** Pre-compute common rotation angles
+
+**Memory:**
+- Original volume: ~200 MB (typical CTA)
+- Resampled slices: 3 × (512×512×2 bytes) ≈ 1.5 MB
+- Reasonable for modern browsers
+
+---
+
+### Configuration File Format
+
+**From viewer.py config system:**
+
+```json
+{
+  "filename": ["patient_001.nii.gz"],
+  "size": 400,
+  "vol": true,
+  "click_mode": 0,
+  "drag_mode": 0,
+  "orientation": [1, 1, 1],
+  "padding": [0, 0, 10],
+  "thickness": 1.0,
+  "perc": [1.0, 99.0],
+  "layer0": {
+    "colormap": "Greys",
+    "interpolator": "linear",
+    "zvalue": 0,
+    "visible": true,
+    "compmode": "SourceOver",
+    "level": [0, 100],
+    "defval": -2048
+  }
+}
+```
+
+**For Web Implementation:** Convert to JSON config for frontend
+
+---
+
+### Future Enhancements
+
+1. **VR Mode:** Gyroscope-based rotation on mobile/tablet
+2. **Multi-touch:** Pinch-to-zoom, two-finger rotation
+3. **Preset Views:** Quick buttons for standard anatomical views
+4. **Rotation Recording:** Save rotation sequence as animation
+5. **Synchronized Multi-Volume:** Rotate multiple volumes together (e.g., CTA + perfusion)
+
+---
+
+## 🎯 Implementation Summary
+
+**General Viewer Features:**
+- ✅ Free rotation with mouse drag (Rodrigues' formula)
+- ✅ Three-panel orthogonal views (YZ, XZ, XY)
+- ✅ Real-time volume resampling
+- ✅ Window/level adjustment
+- ✅ Save/load rotation state
+- ✅ Keyboard shortcuts
+- ✅ Export screenshots and animations
+
+**Integration:**
+- Add **[🔄 General Viewer]** button to top navbar
+- Separate from vessel-specific tools
+- Can be opened alongside or instead of vessel analysis
+- Uses existing viewer.py algorithms
+
+**Next Steps:**
+1. Port viewer.py rotation algorithms to TypeScript
+2. Integrate with NiiVue volume rendering
+3. Add UI button and modal/window system
+4. Test performance with typical CTA volumes
+
+---
+
+**Next Steps:** 
+1. Review algorithms for completeness
+2. Identify any mathematical issues or edge cases
+3. Begin implementation with Algorithm 1 (centerline extraction)
+4. Validate each step with real MEDIS TXT data
 
 ### Implementation Strategy
 
