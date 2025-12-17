@@ -1,0 +1,581 @@
+# 💎 Strategic Funding Proposal: DFG Reinhart Koselleck-Projekt
+
+**Project Title:** *Semantic Volumetrics: Foundation Models for the Longitudinal Digital Twin in Coronary Artery Disease*
+
+**Principal Investigator (Target):** Prof. Marc Dewey  
+**Institution:** Charité – Universitätsmedizin Berlin, Department of Radiology  
+**Funding Mechanism:** DFG Reinhart Koselleck-Projekt  
+**Requested Duration:** 5 years  
+**Estimated Budget:** €1.5-2.0M
+
+---
+
+## Executive Summary: Transforming Cardiovascular Care Through AI
+
+**The Clinical Problem**: Manual coronary segmentation is a bottleneck preventing precision cardiovascular medicine:
+- **Patients wait weeks** for core-lab analysis results (delays treatment decisions)
+- **Costs €200-400 per case** (limits access to advanced imaging analysis)
+- **Only available at specialized centers** (excludes rural/resource-limited hospitals)
+- **Cannot scale to population-level screening** (millions of chest pain patients annually)
+
+<<<<<<< HEAD
+**The Human Impact**: 
+- Delayed diagnosis → continued angina, preventable MACE
+- High costs → rationing of advanced imaging analysis
+- Limited access → health disparities between urban/rural populations
+- Slow research → years to analyze trial data, delaying clinical translation
+=======
+**The Core Innovation:** Adapting Meta's Segment Anything Model (SAM) to 3D cardiovascular and oncological imaging, creating the first **multi-domain foundation model** trained on unprecedented scale: DISCHARGE (25M images), SCOT-HEART (10M images), and Prostate Trial (4M images).
+>>>>>>> 3259bc51afe7eefab41a302d45af8337b4c42427
+
+**Our Solution**: Browser-based AI segmentation platform where:
+- **Clinicians click on coronary artery → AI segments it in 2 seconds** (vs. 30-60 minutes manual)
+- **Works in any browser** (no software installation, accessible from clinic/home)
+- **AI runs on hospital server** (data stays secure, GDPR compliant)
+- **10x faster, €20-40 per case** (vs. €200-400 manual)
+
+**Patient Benefits**:
+- **Faster diagnosis**: Results same day (vs. weeks waiting for core-lab)
+- **Better access**: Available at any hospital with CT scanner (not just specialized centers)
+- **Lower costs**: €180-360 savings per patient → more patients can access advanced imaging
+- **Earlier intervention**: Rapid plaque characterization → timely treatment → prevent MACE
+
+**Healthcare System Benefits**:
+- **€1.8-3.6 million annual savings** per hospital (1,000 cases/year)
+- **Democratize advanced imaging**: Enable precision cardiology at community hospitals
+- **Accelerate research**: Analyze trial data in months (vs. years) → faster clinical translation
+- **Reduce health disparities**: Make expert-level analysis accessible to underserved populations
+
+**The Innovation** (Reinhart Koselleck criteria):
+- **Exceptionally innovative**: First browser-based foundation model platform for cardiovascular imaging
+- **High risk**: Can SAM (trained on natural images) achieve clinical-grade accuracy on medical images?
+- **High reward**: Transform cardiovascular care globally—from specialized centers to every hospital
+
+**Technology**: TypeScript + Vite + Niivue (browser) + FastAPI + SAM-Med3D (hospital server)
+
+---
+
+## 1. Why Reinhart Koselleck?
+
+### The "Exceptionally Innovative" Criterion
+Traditional AI in radiology is **static**—focused on **detection** (finding lesions). We propose to build a model that understands the **evolution of disease**—moving from detection to **prediction** (understanding which lesions will cause events). This requires:
+- Training on outcome data (MACE from DISCHARGE)—the model won't just see "a plaque"; it will see "a plaque that likely leads to an event"
+- Longitudinal modeling (plaque progression over time)
+- Foundation model adaptation (SAM → cardiovascular domain via plaque-aware adapter)
+- Fine-tuning on existing high-quality ground truth masks to bridge the gap between "General SAM" and "Clinical-Grade SAM"
+
+### The "High-Risk" Criterion
+**Three Major Uncertainties:**
+
+1. **Multi-Vendor Harmonization Challenge**
+   - DISCHARGE/SCOT-HEART span Siemens, GE, Canon scanners
+   - Contrast protocols vary significantly
+   - **The Risk:** Can a single model achieve consistent plaque quantification that matches (and eventually exceeds) core-lab standards across this heterogeneity?
+
+2. **Foundation Model Transferability**
+   - SAM was trained on natural images (SA-1B dataset)
+   - Medical imaging has fundamentally different statistics (low contrast, noise, motion artifacts)
+   - **The Risk:** Can a Foundation Model be adapted to identify "vulnerable" plaque features (low-attenuation, positive remodeling) with the same reliability as a trained sub-specialist?
+
+3. **Clinical Validation Gap**
+   - Core-lab experts require years of training
+   - **The Risk:** Can AI match their inter-observer agreement (κ~0.7-0.8) in identifying high-risk plaque?
+   - Will radiologists trust AI for high-stakes decisions involving patient management?
+
+---
+
+## 2. Scientific Foundation
+
+### 2.1 The Data Goldmine
+
+#### DISCHARGE Trial (25M images)
+- **Design:** Multicenter RCT comparing CCTA vs. invasive angiography
+- **Scale:** ~3,500 patients, ~25 million image slices
+- **Outcome Data:** 3.5-year MACE follow-up
+- **Our Advantage:** Link plaque morphology → clinical events at unprecedented scale
+- **Status:** Data access via Prof. Dewey (trial steering committee)
+
+#### SCOT-HEART Trial (10M images)
+- **Design:** CCTA vs. standard care for stable chest pain
+- **Scale:** ~4,100 patients, ~10 million image slices
+- **Outcome Data:** 5-year MACE, 10-year mortality
+- **Our Advantage:** External validation, different population (UK vs. EU)
+- **Status:** Collaboration established with University of Edinburgh
+
+#### Prostate Trial (4M images)
+- **Design:** Multi-parametric MRI for prostate cancer detection
+- **Scale:** ~4 million image slices across multiple sequences
+- **Cross-Domain Impact:** Validates foundation model generalization beyond cardiovascular
+- **Our Advantage:** Tests SAM adapter on different tissue types, contrast mechanisms
+- **Status:** Data access negotiations in progress
+
+#### Utilizing the Annotation Goldmine
+- **Existing high-quality ground truth segmentations** from prior core-lab work (DISCHARGE + SCOT-HEART)
+- Enables supervised fine-tuning of Mask SAM 3D adapter on domain-specific features
+- Bridges the critical gap between "General SAM" (natural images) and "Clinical-Grade SAM" (medical imaging)
+- Foundation for active learning loop: AI suggests → Human corrects → Model improves
+
+### 2.2 Technical Innovation: Mask SAM 3D Architecture
+
+**Dual-Stage Pipeline:**
+
+**Stage 1: nnU-Net Prior**
+- Generates coarse arterial skeleton
+- Provides anatomical context (which vessel is which)
+- Reduces search space for SAM
+
+**Stage 2: SAM-3D Adapter ("Plaque-Aware Refinement")**
+- Takes nnU-Net mask as semantic prompt
+- Refines segmentation with plaque-specific attention mechanisms
+- Outputs:
+  - Vessel lumen boundary
+  - Plaque composition (calcified, non-calcified, low-attenuation)
+  - Remodeling index
+  - Stenosis severity
+
+**Why This Hybrid Matters:**
+- **Standard nnU-Net limitation:** Misses subtle plaques due to low contrast
+- **Pure SAM limitation:** Lacks cardiovascular anatomical priors
+- **Our solution:** Hybrid approach where nnU-Net provides anatomical context and SAM-3D refines with plaque-specific intelligence
+- **Critical advantage:** Can identify high-risk plaques that standard models miss
+
+---
+
+## 3. Research Objectives
+
+### Primary Aim
+Develop and validate a foundation model for automated plaque characterization that matches core-lab expert performance in predicting MACE.
+
+### Secondary Aims
+
+**Aim 1: Technical Development**
+- Adapt SAM architecture to 3D medical imaging
+- Train plaque-aware adapter on DISCHARGE annotations
+- Optimize for multi-vendor generalization
+
+**Aim 2: Clinical Validation**
+- Compare AI vs. expert segmentations (Dice, Hausdorff distance)
+- Assess MACE prediction accuracy (AUC, hazard ratios)
+- Validate on SCOT-HEART (external cohort)
+
+**Aim 3: Longitudinal Modeling**
+- Track plaque progression in serial scans
+- Identify features predictive of rapid progression
+- Build "digital twin" framework for patient-specific risk
+
+**Aim 4: Knowledge Transfer ("Refine-as-You-Go")**
+- Deploy interactive annotation platform (Niivue-based WebGL2 interface)
+- Enable collaborative refinement by research team via browser-based interface
+- **Active Learning Loop:** AI suggests → Human corrects → Model improves iteratively
+- Zero-installation deployment on Charité GPU cluster with secure VPN access
+- Build the "interface through which the next decade of cardiovascular trials will be analyzed"
+
+---
+
+## 4. Methodology
+
+### 4.1 Technical Architecture: Browser-Based Clinical Platform
+
+**Core Innovation**: Zero-installation browser interface + hospital-deployed AI backend
+
+#### Frontend: TypeScript + Vite + Niivue (Latest)
+
+**Technology Stack** (based on proven `frac` project, upgraded):
+```typescript
+// package.json dependencies
+{
+  "@niivue/niivue": "latest",        // Check: likely 0.x series, not v6
+  "@niivue/dcm2niix": "^1.2.0",      // DICOM conversion
+  "typescript": "^5.6.0",             // Type safety
+  "vite": "^7.0.0"                    // Build system
+}
+```
+
+**Project Structure**:
+```
+flow-segment-frontend/
+├── src/
+│   ├── main.ts                 # Application entry
+│   ├── components/
+│   │   ├── Viewer.ts           # Niivue wrapper
+│   │   ├── SegmentPanel.ts     # AI segmentation UI
+│   │   └── ResultsPanel.ts     # Display results
+│   ├── services/
+│   │   ├── api.ts              # Backend API client
+│   │   └── niivue.ts           # Niivue initialization
+│   └── types/
+│       ├── volume.ts           # Volume data types
+│       └── segmentation.ts     # Segmentation types
+├── vite.config.ts
+└── tsconfig.json
+```
+
+**Key capabilities** (from Niivue):
+- WebGL2 rendering for 3D CCTA visualization
+- Interactive click-to-segment (capture 3D coordinates)
+- Multi-planar reconstruction (MPR)
+- Mesh overlay rendering (for AI segmentation results)
+- 4D volume support (for perfusion imaging)
+
+#### Backend: FastAPI + SAM-Med3D
+
+**Model**: SAM-Med3D-turbo (uni-medical/SAM-Med3D)
+- Pre-trained on 44 medical imaging datasets
+- Point/box prompting support
+- PyTorch 2.6.0 implementation
+- Available on Hugging Face
+
+**API Architecture**:
+```python
+# FastAPI endpoints
+POST /api/segment/point       # Point-based prompting
+POST /api/segment/box         # Bounding box prompting
+POST /api/volumes/upload      # DICOM/NIfTI upload
+GET  /api/volumes/{id}        # Retrieve volume
+GET  /api/health              # Health check
+```
+
+**Deployment**: Docker container on Charité GPU cluster
+- NVIDIA A100/V100 GPUs
+- Redis cache for feature embeddings (sub-second response)
+- PACS integration for DICOM ingestion
+- VPN + HTTPS for secure access
+
+### 4.2 Model Development (Adapted from SAM-Med3D)
+
+**Phase 1: Foundation Model Adaptation (Months 1-12)**
+- Download SAM-Med3D-turbo pre-trained weights
+- Fine-tune on DISCHARGE coronary annotations (~300 cases)
+- Implement nnU-Net → SAM-Med3D integration pipeline
+- **Deliverable**: Coronary-specific SAM adapter
+
+**Phase 2: Browser Platform Development (Months 1-12, parallel)**
+- Build TypeScript + Vite + Niivue frontend
+- Implement FastAPI backend with SAM-Med3D
+- Deploy to Charité infrastructure
+- **Deliverable**: Interactive segmentation platform
+
+**Phase 3: Multi-Vendor Optimization (Months 13-24)**
+- Test on Siemens, GE, Canon scanners (DISCHARGE multi-vendor)
+- Develop normalization strategies per vendor
+- Benchmark on held-out test sets
+- **Deliverable**: Vendor-agnostic model
+
+**Phase 4: Clinical Validation (Months 25-36)**
+- Compare AI vs. expert segmentations (100 cases, 3 readers)
+- Validate on SCOT-HEART (external cohort, n=4,100)
+- MACE prediction analysis
+- **Deliverable**: Clinical validation manuscript
+
+**Phase 5: Longitudinal Extension (Months 37-48)**
+- Implement temporal registration for serial scans
+- Train progression prediction model
+- Build digital twin framework
+- **Deliverable**: Longitudinal modeling manuscript
+
+### 4.3 Implementation Roadmap (Integrated from Technical Plan)
+
+#### Phase 1: Minimal Viable Research (MVR) Tool (Months 1-3)
+
+**Backend Setup**:
+- Containerize SAM-Med3D-turbo (Docker + PyTorch 2.6)
+- Implement FastAPI endpoints (segment/point, segment/box, volumes/upload)
+- Set up embedding cache (Redis) for <2s response time
+- Test with single DISCHARGE volume
+
+**Frontend Development**:
+- Initialize Vite + TypeScript project
+- Install @niivue/niivue (latest stable)
+- Implement core features:
+  - Volume loading (NIfTI format)
+  - Click event capture → 3D coordinate extraction
+  - API integration for segmentation requests
+  - Overlay rendering with toggle controls
+- Add MPR view synchronization
+
+**Integration & Testing**:
+- Connect frontend ↔ backend via REST API
+- Test interactive loop:
+  1. Load DISCHARGE CCTA volume in Niivue
+  2. User clicks coronary artery point
+  3. Backend returns 3D segmentation mask
+  4. Niivue overlays mask in real-time
+- Optimize latency (target: <2s per segmentation)
+
+**Milestone 1**: Working prototype with single-case demo
+
+#### Phase 2: Clinical Deployment at Charité (Months 4-6)
+
+**Infrastructure**:
+- Deploy on Charité GPU cluster (NVIDIA A100)
+- Implement authentication (LDAP/SSO integration)
+- Set up secure DICOM ingestion pipeline
+- Configure HTTPS + VPN access
+
+**Active Learning Workflow**:
+- Add annotation refinement tools in Niivue:
+  - Brush tool for mask correction
+  - Eraser for false positives
+  - Save corrected masks to training database
+- Implement feedback loop:
+  - Collect user corrections
+  - Periodic model fine-tuning on refined annotations
+  - Version control for model iterations
+
+**SCOT-HEART Integration**:
+- Batch process SCOT-HEART dataset (n=4,100)
+- Generate initial segmentations for review
+- Enable collaborative annotation by research team
+- Quality control dashboard (Dice scores, manual review flags)
+
+**Milestone 2**: Platform deployed, team onboarded, batch processing operational
+
+#### Phase 3: Clinical Validation (Months 7-12)
+
+**Validation Strategy**:
+1. **Internal Validation:** 80/20 train/test split on DISCHARGE
+2. **External Validation:** Full SCOT-HEART dataset (no training)
+3. **Expert Comparison:** 100 cases independently read by 3 core-lab experts
+
+**Metrics**:
+- **Segmentation:** Dice coefficient >0.85, Hausdorff distance <2mm
+- **Classification:** Sensitivity/specificity for high-risk plaque
+- **Prediction:** AUC for MACE, net reclassification improvement (NRI)
+- **Efficiency:** Time savings vs. manual segmentation (target: 10x faster)
+
+**Milestone 3**: Validation complete, first manuscript submitted
+
+### 4.4 Deployment Strategy: Hospital-Based Platform
+
+**Deployment Model**: On-premise at Charité (GDPR compliant)
+
+**Architecture**:
+```
+[Clinician Browser] ←HTTPS/VPN→ [Charité Firewall] → [Frontend: Nginx] 
+                                                      ↓
+                                         [Backend: FastAPI + SAM-Med3D]
+                                                      ↓
+                                         [GPU Cluster: NVIDIA A100]
+                                                      ↓
+                                         [PACS Integration]
+```
+
+**Security & Compliance**:
+- No external data transfer (all processing on-premise)
+- LDAP/SSO authentication
+- Audit logging for all segmentations
+- GDPR Article 32 compliance (data security)
+- EU AI Act Article 14 compliance (human oversight)
+
+**Scalability**:
+- Single server supports 10-20 concurrent users
+- Batch processing overnight (100+ cases)
+- Multi-site deployment (Charité → other hospitals)
+
+**Active Learning Loop**:
+- AI suggests segmentations
+- Experts correct via intuitive Niivue interface
+- Model retrains weekly on corrected data
+- Performance improves iteratively (continuous learning)
+
+---
+
+## 5. Work Plan & Milestones
+
+### Year 1: Foundation
+- **Q1-Q2:** Infrastructure setup, multi-trial data ingestion (39M images total), baseline nnU-Net training
+- **Q3-Q4:** SAM adapter development, initial DISCHARGE experiments (25M images)
+- **Milestone:** Proof-of-concept across all three domains (cardiovascular + prostate)
+
+### Year 2: Optimization
+- **Q1-Q2:** Multi-vendor harmonization across DISCHARGE/SCOT-HEART (35M images), hyperparameter tuning
+- **Q3-Q4:** Niivue platform deployment for all datasets, team onboarding
+- **Milestone:** Internal validation complete (Dice >0.85 cardiovascular, >0.80 prostate)
+
+### Year 3: Validation
+- **Q1-Q2:** SCOT-HEART external validation (10M images), prostate cross-domain validation (4M images)
+- **Q3-Q4:** Expert comparison study, MACE prediction analysis across trials
+- **Milestone:** First manuscript submission (technical methods + cross-domain results)
+
+### Year 4: Longitudinal Modeling
+- **Q1-Q2:** Temporal registration, progression tracking
+- **Q3-Q4:** Digital twin framework, risk stratification
+- **Milestone:** Second manuscript (clinical validation)
+
+### Year 5: Translation
+- **Q1-Q2:** Multi-center deployment pilot
+- **Q3-Q4:** Regulatory pathway exploration (CE marking)
+- **Milestone:** Final synthesis paper, commercialization plan
+
+---
+
+## 6. Team & Resources
+
+### Core Team (To Be Assembled)
+- **PI:** Prof. Marc Dewey (Radiology, CCTA expertise)
+- **Co-PI:** AI/ML expert (computer vision, foundation models)
+- **Postdoc 1:** Medical imaging AI (model development)
+- **Postdoc 2:** Clinical validation (outcomes research)
+- **PhD Student 1:** Technical implementation (Niivue platform)
+- **PhD Student 2:** Longitudinal modeling (digital twin)
+- **Research Assistant:** Data management, annotation coordination
+
+### Infrastructure Requirements
+- **Compute:** GPU cluster (4x NVIDIA A100, 80GB VRAM each)
+- **Storage:** 100TB NAS for DICOM/NIfTI volumes
+- **Software:** PyTorch, FastAPI, Niivue, Docker
+- **Clinical:** Secure PACS integration, VPN access
+
+### Budget Estimate (5 Years)
+- **Personnel:** €1.2M (4 postdocs/PhDs, 1 RA)
+- **Equipment:** €300K (GPU cluster, storage)
+- **Operations:** €200K (cloud compute, conferences, publications)
+- **Indirect Costs:** €300K
+- **Total:** €2.0M
+
+---
+
+## 7. Expected Impact
+
+### Scientific Impact
+- **Paradigm Shift:** From static detection to dynamic prediction
+- **Methodological Innovation:** First cardiovascular foundation model
+- **Open Science:** Code, models, and annotations publicly released
+
+### Clinical Impact
+- **Efficiency:** 10x faster than manual core-lab analysis
+- **Scalability:** Enable large-scale phenotyping studies
+- **Precision Medicine:** Patient-specific risk stratification
+
+### Economic Impact
+- **Cost Reduction:** Reduce need for invasive angiography
+- **Trial Efficiency:** Accelerate endpoint adjudication in RCTs
+- **Commercialization:** Spin-off potential for clinical deployment
+
+---
+
+## 8. Risk Mitigation & Contingencies
+
+### Technical Risks
+| Risk | Probability | Mitigation |
+|------|------------|-----------|
+| SAM doesn't transfer to medical imaging | Medium | Fall back to pure nnU-Net with attention mechanisms |
+| Multi-vendor harmonization fails | Low | Vendor-specific models as backup |
+| Computational requirements exceed budget | Medium | Cloud compute credits, phased GPU acquisition |
+
+### Clinical Risks
+| Risk | Probability | Mitigation |
+|------|------------|-----------|
+| AI doesn't match expert performance | Medium | Focus on augmentation (AI + human) rather than replacement |
+| Regulatory barriers to deployment | High | Engage early with notified bodies, plan CE marking pathway |
+| Adoption resistance from radiologists | Medium | Co-design with end users, emphasize time savings |
+
+---
+
+## 9. Why Prof. Marc Dewey?
+
+### Unique Positioning
+- **Data Access:** Steering committee for DISCHARGE, collaborator on SCOT-HEART
+- **Clinical Expertise:** World-leading CCTA researcher (>400 publications, h-index 89)
+- **Infrastructure:** Charité has GPU cluster, PACS integration, regulatory support
+- **Track Record:** Proven ability to lead large multicenter trials
+
+### Strategic Alignment
+- Charité's focus on translational AI in radiology
+- Berlin as hub for medical AI startups (regulatory sandbox)
+- DFG priority on high-risk/high-reward cardiovascular research
+
+---
+
+## 10. Competitive Landscape
+
+### Current State-of-the-Art
+- **Commercial:** HeartFlow (FFR-CT), Cleerly (plaque analysis)
+  - *Limitation:* Proprietary, black-box, expensive
+- **Academic:** nnU-Net-based segmentation
+  - *Limitation:* Requires extensive training data, poor generalization
+
+### Our Differentiators
+1. **Foundation Model Approach:** Leverage pre-trained SAM representations
+2. **Outcome-Driven Training:** Learn from MACE data, not just morphology
+3. **Open Platform:** Niivue-based interface for community adoption
+4. **Longitudinal Focus:** Digital twin for progression tracking
+
+---
+
+## 11. Dissemination & Open Science
+
+### Publications (Target)
+- **Year 3:** Technical methods paper (Nature Methods / Medical Image Analysis)
+- **Year 4:** Clinical validation (JACC: Cardiovascular Imaging / Radiology)
+- **Year 5:** Longitudinal modeling (European Heart Journal / Circulation)
+
+### Code & Data Release
+- **GitHub:** Open-source Mask SAM 3D implementation
+- **Zenodo:** Pre-trained model weights
+- **Grand Challenge:** Public benchmark dataset (anonymized subset)
+
+### Community Engagement
+- **Workshops:** MICCAI, RSNA, ESC Congress
+- **Tutorials:** Niivue platform training for researchers
+- **Collaborations:** Invite external validation on other cohorts
+
+---
+
+## 12. Sustainability Beyond Funding
+
+### Academic Pathway
+- Establish Charité as center of excellence for cardiovascular AI
+- Train next generation of medical imaging researchers
+- Secure follow-on funding (ERC, Horizon Europe)
+
+### Clinical Translation
+- CE marking for clinical deployment in EU
+- Licensing agreements with PACS vendors
+- Integration into Charité clinical workflow
+
+### Commercial Pathway
+- Spin-off company for global distribution
+- Partnerships with scanner manufacturers (Siemens, GE, Canon)
+- Subscription model for cloud-based analysis
+
+---
+
+## 13. Conclusion: The Koselleck Vision
+
+This proposal embodies the Reinhart Koselleck spirit:
+- **Exceptional Innovation:** First foundation model for cardiovascular imaging
+- **High Risk:** Uncertain if SAM transfers to medical domain
+- **High Reward:** Transform cardiovascular risk assessment globally
+
+We are not building another segmentation tool. We are building the **intelligence layer** through which the next decade of cardiovascular trials will be analyzed—moving from detection to prediction, from static snapshots to dynamic digital twins.
+
+**The Question:** Can we teach a machine to see what cardiologists see—and predict what they cannot?
+
+**The Answer:** With DISCHARGE, SCOT-HEART, and the Mask SAM 3D architecture, we have the data, the technology, and the team to find out.
+
+---
+
+## Appendices
+
+### Appendix A: Letters of Support (To Be Obtained)
+- Prof. Marc Dewey (Charité)
+- Prof. David Newby (University of Edinburgh, SCOT-HEART PI)
+- Industry partner (Siemens Healthineers / NVIDIA)
+
+### Appendix B: Preliminary Data
+- Existing segmentation performance on pilot dataset
+- nnU-Net baseline results
+- Niivue platform screenshots
+
+### Appendix C: Ethical Approval
+- Charité IRB approval for DISCHARGE data use
+- SCOT-HEART data sharing agreement
+- GDPR compliance documentation
+
+---
+
+**Document Version:** 1.0  
+**Last Updated:** 2025-12-17  
+**Contact:** Flow Project Team  
+**Next Action:** Schedule meeting with Prof. Dewey to discuss PI role and refine proposal
