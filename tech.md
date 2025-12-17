@@ -28,6 +28,354 @@
 
 ---
 
+## 🧠 Foundation Model Approach: Unified Segmentation with MedSAM3D
+
+### The Vision: Universal Medical Segmentation
+**Goal:** A single foundation model that segments any anatomical structure across imaging modalities using minimal user interaction (1-3 clicks).
+
+**Foundation Models in Medical Imaging:**
+- **Traditional approach:** Task-specific models (one model per organ, per modality)
+- **Foundation model approach:** Single large model pre-trained on diverse medical data → universal segmentation
+- **Key advantage:** Generalization to new anatomies without retraining
+
+**MedSAM3D** [@Ma2024MedSAM3D] represents this paradigm shift:
+- **Pre-training:** 143K 3D segmentation masks across 245 anatomical categories
+- **Architecture:** 3D Vision Transformer (ViT-B/16) with prompt-based decoder
+- **Interactive segmentation:** User provides point/box prompts → model segments target structure
+- **Zero-shot capability:** Works on unseen anatomies without fine-tuning
+
+---
+
+## 🫀 Clinical Use Cases: Cardiac & Prostate CTA Segmentation
+
+### Overview
+Our platform targets **volumetric segmentation of cardiovascular and pelvic structures** from CT angiography (CTA):
+
+| **Anatomy** | **Structure** | **Clinical Need** | **Difficulty** |
+|-------------|---------------|-------------------|----------------|
+| **Cardiac** | Myocardium | Quantify heart muscle mass, wall thickness, perfusion defects | ⭐⭐ Medium |
+| **Cardiac** | Coronary arteries (inner wall/lumen) | Quantify stenosis, plaque burden, FFR-CT simulation | ⭐⭐⭐⭐⭐ Extreme |
+| **Cardiac** | Coronary arteries (outer wall/vessel) | Quantify total plaque volume, vessel remodeling | ⭐⭐⭐⭐⭐ Extreme |
+| **Pelvic** | Prostate | Quantify prostate volume, treatment planning | ⭐⭐ Medium |
+
+**Why coronary arteries are the most challenging anatomy:**
+1. **Motion artifacts:** Heart beats 60-80 times/min → blurring, ghosting despite ECG gating
+2. **Low attenuation plaques:** Non-calcified/lipid-rich plaques (40-80 HU) barely visible vs. contrast (300-400 HU)
+3. **Complex topology:** Bifurcations, overlapping vessels, crossing branches
+4. **Small caliber:** 1.5-4mm diameter → partial volume effects at typical 0.5-0.625mm resolution
+5. **Dual-wall segmentation:** Must segment both inner (lumen) and outer (vessel) boundaries simultaneously
+
+---
+
+## 🔬 Technical Challenges & Solutions
+
+### Challenge 1: Coronary Artery Motion Artifacts
+**Problem:**
+- Despite ECG-gated acquisition (mid-diastole, 70-80% R-R interval), residual motion blurs vessel edges
+- Severe cases: "ghost vessels" from arrhythmia or high heart rate (>70 bpm)
+- Right coronary artery (RCA) most affected due to higher velocity
+
+**Solution:**
+```python
+# Motion correction via temporal consistency
+def motion_robust_segmentation(volume_4d, heart_rate):
+    """
+    Multi-phase coronary segmentation with motion compensation.
+    
+    Args:
+        volume_4d: 4D volume [X, Y, Z, T] with multiple cardiac phases
+        heart_rate: Patient heart rate (bpm)
+    """
+    if heart_rate > 70:
+        # Use multi-phase reconstruction
+        phases = extract_cardiac_phases(volume_4d, num_phases=10)
+        
+        # Segment each phase independently
+        masks_per_phase = []
+        for phase in phases:
+            mask = medsam3d_segment(phase, prompt_type='point')
+            masks_per_phase.append(mask)
+        
+        # Temporal median filter to remove motion ghosts
+        mask_final = np.median(masks_per_phase, axis=0) > 0.5
+        
+        # Deformable registration to align phases
+        mask_registered = elastix_align(masks_per_phase, reference=phases[5])
+        
+        return mask_registered
+    else:
+        # Single-phase segmentation sufficient
+        return medsam3d_segment(volume_4d[:,:,:,0], prompt_type='point')
+```
+
+**Additional strategies:**
+- **Pre-processing:** Edge-preserving denoising (bilateral filter) to reduce motion blur without losing vessel boundaries
+- **Prompt placement:** Multiple prompts along vessel centerline (every 5-10mm) to guide segmentation through motion-corrupted regions
+- **Quality control:** Automatic detection of motion artifacts via edge sharpness metrics → flag for manual review
+
+---
+
+### Challenge 2: Low Attenuation Plaque Detection
+**Problem:**
+- **Non-calcified plaque (NCP):** 40-80 HU, only 20-60 HU contrast vs. lumen (300-400 HU)
+- **Lipid-rich plaque:** 20-50 HU, overlaps with myocardium (50-70 HU) → nearly invisible
+- **Blooming artifacts:** Calcified plaque (>130 HU) causes beam hardening → obscures adjacent NCP
+
+**Solution:**
+```python
+# Multi-scale feature extraction for low-contrast plaques
+def detect_low_attenuation_plaque(volume, vessel_mask):
+    """
+    Enhanced plaque detection using multi-scale ViT features.
+    
+    Key insight: MedSAM3D's ViT encoder captures subtle texture patterns
+    that distinguish plaque from lumen, even at low contrast.
+    """
+    # Step 1: Extract vessel region of interest (ROI)
+    vessel_roi = volume * vessel_mask
+    
+    # Step 2: Contrast enhancement for low HU regions
+    vessel_enhanced = adaptive_histogram_equalization(
+        vessel_roi, 
+        clip_limit=0.03,  # Preserve texture
+        kernel_size=32    # Local enhancement
+    )
+    
+    # Step 3: MedSAM3D feature extraction (multi-scale)
+    features = medsam3d_encoder(vessel_enhanced)  # Shape: [B, 768, H/16, W/16, D/16]
+    
+    # Step 4: Plaque-specific attention head
+    # Trained on SCOT-HEART annotations (n=4,146) to recognize:
+    # - Napkin-ring sign (lipid core)
+    # - Positive remodeling (vulnerable plaque)
+    # - Low attenuation (<30 HU)
+    plaque_probs = plaque_attention_decoder(
+        features,
+        prompt=inner_wall_mask,  # Use lumen as prior
+        attn_weights='plaque_specific'
+    )
+    
+    # Step 5: HU-based refinement
+    # Rule: Plaque must be between lumen and outer wall
+    plaque_mask = (plaque_probs > 0.5) & (vessel_roi < 200)  # Exclude calcified
+    
+    return plaque_mask
+```
+
+**Plaque characterization pipeline:**
+```python
+def characterize_plaque_components(volume, vessel_mask, lumen_mask):
+    """
+    Classify plaque into 3 categories based on HU thresholds.
+    Validated against intravascular ultrasound (IVUS) gold standard.
+    """
+    # Extract vessel wall (between lumen and outer wall)
+    vessel_wall = vessel_mask & ~lumen_mask
+    hu_values = volume[vessel_wall]
+    
+    # Plaque component classification (SCOT-HEART criteria)
+    calcified = (hu_values > 130)        # Dense calcium
+    non_calcified = (hu_values >= 80) & (hu_values <= 130)  # Fibrous
+    low_attenuation = (hu_values < 80)   # Lipid-rich (high risk)
+    
+    # Quantification
+    total_volume = np.sum(vessel_wall) * voxel_volume_mm3
+    calc_volume = np.sum(calcified) * voxel_volume_mm3
+    noncalc_volume = np.sum(non_calcified) * voxel_volume_mm3
+    lowatt_volume = np.sum(low_attenuation) * voxel_volume_mm3
+    
+    # Stenosis calculation
+    stenosis_percent = (1 - np.mean(lumen_area) / np.mean(reference_area)) * 100
+    
+    return {
+        'total_plaque_volume_mm3': total_volume,
+        'calcified_percent': calc_volume / total_volume * 100,
+        'non_calcified_percent': noncalc_volume / total_volume * 100,
+        'low_attenuation_percent': lowatt_volume / total_volume * 100,
+        'stenosis_percent': stenosis_percent,
+        'high_risk_plaque': lowatt_volume > 0.04 * total_volume  # >4% LAP
+    }
+```
+
+---
+
+### Challenge 3: Dual-Wall Coronary Segmentation
+**Problem:**
+- Must segment **both inner wall (lumen)** and **outer wall (vessel)** to quantify plaque burden
+- Spacing between walls: 0.5-3mm (only 1-5 voxels at 0.625mm resolution)
+- Overlapping vessels and bifurcations make outer wall ambiguous
+
+**Solution: Sequential Prompting Strategy**
+```python
+def dual_wall_coronary_segmentation(volume, user_click):
+    """
+    Two-stage segmentation: lumen first, then outer wall.
+    
+    Stage 1: Lumen (bright, high contrast → easy)
+    Stage 2: Outer wall (low contrast → use lumen as prior)
+    """
+    # Stage 1: Segment lumen (inner wall)
+    lumen_mask = medsam3d_segment(
+        volume,
+        prompt_point=user_click,
+        prompt_type='point',
+        target='high_intensity'  # Expects bright lumen (300-400 HU)
+    )
+    
+    # Stage 2: Segment outer wall using lumen as prior
+    # Key insight: Outer wall is always 0.5-3mm away from lumen
+    outer_mask = medsam3d_segment(
+        volume,
+        prompt_point=user_click,
+        prompt_type='point',
+        prior_mask=lumen_mask,     # Context: lumen location
+        expansion_range='0.5-3mm',  # Expected vessel wall thickness
+        target='low_intensity'      # Expects darker plaque/vessel wall
+    )
+    
+    # Post-processing: Ensure outer wall contains lumen
+    outer_mask = morphological_closing(outer_mask, radius=2)
+    outer_mask = outer_mask | lumen_mask  # Guarantee containment
+    
+    # Vessel wall = outer - inner
+    vessel_wall_mask = outer_mask & ~lumen_mask
+    
+    return {
+        'lumen': lumen_mask,
+        'outer_wall': outer_mask,
+        'vessel_wall': vessel_wall_mask
+    }
+```
+
+**Alternative: Multi-class Segmentation**
+```python
+# Single-pass multi-class segmentation (faster but less accurate)
+def multiclass_coronary_segment(volume, user_click):
+    """
+    Segment lumen and vessel wall simultaneously.
+    Requires fine-tuning on DISCHARGE dataset (n=3,561).
+    """
+    output = medsam3d_segment(
+        volume,
+        prompt_point=user_click,
+        num_classes=3,  # Background, Lumen, Vessel Wall
+        class_weights=[0.1, 1.0, 0.8]  # Emphasize lumen (easier)
+    )
+    
+    lumen_mask = output == 1
+    vessel_wall_mask = output == 2
+    outer_mask = (output == 1) | (output == 2)
+    
+    return {
+        'lumen': lumen_mask,
+        'outer_wall': outer_mask,
+        'vessel_wall': vessel_wall_mask
+    }
+```
+
+---
+
+### Challenge 4: Myocardium Segmentation
+**Problem:**
+- Large structure (100-200mL) → computationally expensive
+- Trabeculations and papillary muscles difficult to distinguish from myocardium
+- Variable contrast enhancement (early vs. late arterial phase)
+
+**Solution:**
+```python
+def segment_myocardium(volume, user_click):
+    """
+    Full myocardium segmentation using nnU-Net prior + MedSAM3D refinement.
+    
+    Strategy: Coarse-to-fine approach
+    1. nnU-Net: Fast whole-heart segmentation (5s)
+    2. MedSAM3D: Refine myocardial boundaries (2s)
+    """
+    # Stage 1: nnU-Net prior (pre-trained on SCOT-HEART)
+    coarse_mask = nnunet_predict(
+        volume,
+        task='Task500_CardiacCTA',
+        fold='all',
+        checkpoint='best'
+    )
+    
+    # Extract myocardium label (label=2 in our convention)
+    myocardium_coarse = (coarse_mask == 2)
+    
+    # Stage 2: MedSAM3D boundary refinement
+    myocardium_refined = medsam3d_segment(
+        volume,
+        prompt_mask=myocardium_coarse,  # Use nnU-Net as prior
+        prompt_type='mask',
+        refinement_mode=True,           # Only refine boundaries
+        boundary_width=5                # Refine 5mm around edges
+    )
+    
+    # Post-processing: Remove trabeculations (optional)
+    myocardium_smooth = morphological_opening(
+        myocardium_refined,
+        radius=2  # Remove structures <2mm
+    )
+    
+    return myocardium_smooth
+```
+
+---
+
+### Challenge 5: Prostate Segmentation
+**Problem:**
+- Variable contrast (depends on timing of contrast injection)
+- Prostate can be enlarged (benign prostatic hyperplasia, BPH) or irregular (cancer)
+- Adjacent rectum and bladder can confuse segmentation
+
+**Solution:**
+```python
+def segment_prostate(volume, user_click):
+    """
+    Prostate segmentation using MedSAM3D with pelvic anatomy priors.
+    
+    Relatively straightforward compared to coronaries:
+    - Larger structure (20-80mL) → easier to segment
+    - Less motion (no cardiac motion)
+    - Higher contrast vs. surrounding fat
+    """
+    # MedSAM3D direct segmentation
+    prostate_mask = medsam3d_segment(
+        volume,
+        prompt_point=user_click,
+        prompt_type='point',
+        target='moderate_intensity'  # Prostate: 40-60 HU
+    )
+    
+    # Post-processing: Enforce anatomical constraints
+    # 1. Prostate is above rectum, below bladder
+    # 2. Typical volume: 20-80mL (flag if >100mL)
+    prostate_volume = np.sum(prostate_mask) * voxel_volume_mm3
+    
+    if prostate_volume > 100_000:  # >100mL → likely includes rectum/bladder
+        # Morphological refinement
+        prostate_mask = keep_largest_component(prostate_mask)
+        prostate_mask = morphological_opening(prostate_mask, radius=3)
+    
+    return prostate_mask
+```
+
+---
+
+### Summary: Difficulty Ranking & Strategies
+
+| **Anatomy** | **Key Challenge** | **Strategy** | **Processing Time** |
+|-------------|-------------------|--------------|---------------------|
+| **Prostate** | Variable contrast, adjacent organs | MedSAM3D direct + morphological refinement | <2s |
+| **Myocardium** | Large structure, trabeculations | nnU-Net prior + MedSAM3D refinement | ~7s |
+| **Coronary lumen** | Motion artifacts, small caliber | Multi-phase + multi-prompt MedSAM3D | ~3s |
+| **Coronary outer wall** | Low contrast plaque, dual-wall | Sequential segmentation (lumen → outer) | ~5s |
+| **Low-attenuation plaque** | Near-invisible (<80 HU) | Multi-scale ViT features + HU thresholds | ~2s |
+
+**Overall coronary segmentation pipeline: ~10-15 seconds per vessel** (LAD, LCx, or RCA)
+
+---
+
 ## 🎯 Technology Stack
 
 ### Frontend: TypeScript + Vite + Niivue v0.66.0
