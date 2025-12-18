@@ -18,15 +18,13 @@
 - **Only available at specialized centers** (excludes rural/resource-limited hospitals)
 - **Cannot scale to population-level screening** (millions of chest pain patients annually)
 
-<<<<<<< HEAD
 **The Human Impact**: 
 - Delayed diagnosis → continued angina, preventable MACE
 - High costs → rationing of advanced imaging analysis
 - Limited access → health disparities between urban/rural populations
 - Slow research → years to analyze trial data, delaying clinical translation
-=======
+
 **The Core Innovation:** Adapting Meta's Segment Anything Model (SAM) to 3D cardiovascular and oncological imaging, creating the first **multi-domain foundation model** trained on unprecedented scale: DISCHARGE (25M images), SCOT-HEART (10M images), and Prostate Trial (4M images).
->>>>>>> 3259bc51afe7eefab41a302d45af8337b4c42427
 
 **Our Solution**: Browser-based AI segmentation platform where:
 - **Clinicians click on coronary artery → AI segments it in 2 seconds** (vs. 30-60 minutes manual)
@@ -498,6 +496,134 @@ GET  /api/health              # Health check
 - **Q1-Q2:** Multi-center deployment pilot
 - **Q3-Q4:** Regulatory pathway exploration (CE marking)
 - **Milestone:** Final synthesis paper, commercialization plan
+
+---
+
+### Detailed Implementation Phases
+
+#### Phase 1: MVR Tool (Months 1-3, 8-12 weeks)
+
+**Backend Setup:**
+- [ ] Containerize SAM-Med3D-turbo model (Docker + PyTorch)
+- [ ] Implement FastAPI endpoints: `POST /segment/point`, `POST /segment/box`, `GET /volume/{id}`
+- [ ] Set up embedding cache (Redis/disk-based) for sub-2s response
+- [ ] Test with single DISCHARGE volume
+
+**Frontend Development:**
+- [ ] Initialize Vite + TypeScript project
+- [ ] Install @niivue/niivue package (v0.66.0)
+- [ ] Implement: Volume loading, click event capture, API integration, overlay rendering
+- [ ] Add MPR view synchronization
+
+**Integration & Testing:**
+- [ ] Connect frontend ↔ backend via REST API
+- [ ] Test complete interactive loop: Load → Click → Segment → Overlay
+- [ ] Optimize latency (target: <2s per segmentation)
+
+#### Phase 2: Clinical Deployment (Months 4-6, 12-16 weeks)
+
+**Infrastructure:**
+- [ ] Deploy on Charité GPU cluster (NVIDIA A100/V100)
+- [ ] Implement authentication (LDAP/SSO)
+- [ ] Set up secure DICOM ingestion pipeline
+- [ ] Configure HTTPS + VPN access
+
+**Active Learning Workflow:**
+- [ ] Add annotation refinement tools (brush, eraser, drawing tools)
+- [ ] Implement intelligent feedback loop: AI suggests → Human corrects → Model updates
+- [ ] Version control for model iterations with A/B testing
+- [ ] Enable collaborative annotation by research team
+
+**Multi-Trial Data Integration:**
+- [ ] DISCHARGE (25M): Batch process primary cohort
+- [ ] SCOT-HEART (10M): External validation and collaborative annotation
+- [ ] Prostate (4M): Cross-domain validation
+- [ ] Quality control dashboard (Dice scores, manual review flags)
+
+#### Phase 3: Research-Grade Platform (Months 7-12, 16-24 weeks)
+
+**Advanced Features:**
+- [ ] Plaque characterization: Low-attenuation detection, positive remodeling, stenosis scoring
+- [ ] Longitudinal analysis: Multi-timepoint registration, progression tracking, digital twin
+
+**Validation & Benchmarking:**
+- [ ] Compare against core-lab manual segmentations
+- [ ] Calculate metrics: Dice coefficient, Hausdorff distance, clinical agreement
+- [ ] Multi-vendor validation (Siemens, GE, Canon)
+
+**Publication-Ready Outputs:**
+- [ ] Export quantitative reports (plaque volume, composition)
+- [ ] Generate manuscript figures
+- [ ] Anonymization pipeline for data sharing
+
+---
+
+### Risk Mitigation Strategy
+
+#### Technical Risks
+| Risk | Probability | Mitigation |
+|------|-------------|-----------|
+| Large volume latency | Medium | Pre-compute embeddings, progressive loading, volume streaming |
+| Browser memory limits | Medium | Implement volume streaming, downsample for preview |
+| Model accuracy on edge cases | Medium | Active learning loop, expert review queue |
+| Multi-vendor variability | Low | Normalization pipeline, vendor-specific fine-tuning |
+| SAM doesn't transfer to medical imaging | Medium | Fall back to pure nnU-Net with attention mechanisms |
+| Computational requirements exceed budget | Medium | Cloud compute credits, phased GPU acquisition |
+
+#### Clinical/Deployment Risks
+| Risk | Probability | Mitigation |
+|------|-------------|-----------|
+| Charité IT approval delays | Medium | Early engagement, security audit, compliance documentation |
+| User adoption resistance | Medium | Training sessions, intuitive UI, performance demos, co-design with end users |
+| Data privacy concerns | Low | On-premise deployment, no external data transfer, GDPR compliance |
+| AI doesn't match expert performance | Medium | Focus on augmentation (AI + human) rather than replacement |
+| Regulatory barriers | High | Engage early with notified bodies, plan CE marking pathway |
+
+---
+
+### Success Metrics & KPIs
+
+#### Technical KPIs
+- **Segmentation Speed:** <2 seconds per vessel segment
+- **Accuracy:** Dice score >0.85 vs. expert annotations (cardiovascular), >0.80 (prostate)
+- **Uptime:** >99% availability during research hours
+- **Latency:** End-to-end click-to-overlay <2s (target)
+
+#### Research KPIs
+- **Annotation Throughput:** 10× faster than manual segmentation
+- **SCOT-HEART Coverage:** >80% of dataset processed in 6 months
+- **Publications:** 2+ peer-reviewed papers within 18 months
+- **Multi-Trial Processing:** 39M images (DISCHARGE + SCOT-HEART + Prostate) analyzed
+
+#### Clinical Impact KPIs
+- **Time Savings:** Reduce core-lab analysis from 30-60 min to <5 min per case
+- **Cost Reduction:** €20-40 per case (vs. €200-400 manual)
+- **MACE Prediction:** AUC >0.75 for 3-year MACE risk
+- **Expert Agreement:** κ >0.7 with core-lab readers for plaque characterization
+
+---
+
+### Technology Stack Summary
+
+**Frontend:**
+- Framework: Vite + TypeScript
+- 3D Engine: @niivue/niivue v0.66.0 (WebGL2)
+- Mesh Generation: @kitware/vtk.js (marching cubes)
+- UI: Modern dark theme, radiologist-first design
+- State: Type-safe TypeScript throughout
+
+**Backend:**
+- API: FastAPI (Python 3.10+)
+- AI Engine: SAM-Med3D-turbo (PyTorch 2.6+)
+- Image Processing: SimpleITK, nibabel, nii2mesh
+- Cache: Redis for feature embeddings
+- Container: Docker + NVIDIA Container Toolkit
+
+**Infrastructure:**
+- Deployment: Charité GPU Cluster (NVIDIA A100/V100)
+- Storage: PACS integration + NAS for processed volumes
+- Security: VPN + HTTPS + LDAP authentication
+- Compliance: GDPR Article 32, EU AI Act Article 14
 
 ---
 

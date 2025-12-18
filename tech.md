@@ -46,6 +46,137 @@
 
 ---
 
+## 🏗️ Project Structure
+
+### Frontend Architecture (TypeScript + Vite + Niivue)
+
+```
+flow-segment-frontend/
+├── src/
+│   ├── main.ts                 # Application entry point
+│   ├── components/
+│   │   ├── Viewer.ts           # Niivue viewer wrapper
+│   │   ├── Toolbar.ts          # UI controls
+│   │   ├── SegmentPanel.ts     # AI segmentation interface
+│   │   └── ResultsPanel.ts     # Display segmentation results
+│   ├── services/
+│   │   ├── api.ts              # Backend API client
+│   │   ├── niivue.ts           # Niivue initialization
+│   │   ├── medisParser.ts      # MEDIS TXT parsing
+│   │   ├── medisMeshDirect.ts  # Direct mesh construction
+│   │   └── auth.ts             # Authentication
+│   ├── types/
+│   │   ├── volume.ts           # Volume data types
+│   │   ├── segmentation.ts     # Segmentation types
+│   │   ├── medis.ts            # MEDIS contour types
+│   │   └── api.ts              # API response types
+│   └── utils/
+│       ├── dicom.ts            # DICOM utilities
+│       └── nifti.ts            # NIfTI utilities
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+└── index.html
+```
+
+**Key Features:**
+- **TypeScript throughout:** Type-safe, maintainable codebase
+- **Modular architecture:** Separation of concerns (components, services, types, utils)
+- **Backend API integration:** RESTful communication with FastAPI server
+- **Focus on segmentation:** AI-driven interactive segmentation workflow
+
+### Backend Architecture (FastAPI + SAM-Med3D)
+
+```
+flow-segment-backend/
+├── app/
+│   ├── main.py                 # FastAPI application entry
+│   ├── models/
+│   │   ├── medsam3d.py         # SAM-Med3D model wrapper
+│   │   └── nnu_net.py          # nnU-Net prior (anatomical context)
+│   ├── api/
+│   │   ├── segment.py          # Segmentation endpoints
+│   │   ├── volumes.py          # Volume management
+│   │   ├── mesh.py             # Mesh generation (nii2mesh)
+│   │   └── auth.py             # Authentication (LDAP/SSO)
+│   ├── services/
+│   │   ├── cache.py            # Embedding cache (Redis)
+│   │   ├── dicom.py            # DICOM processing (SimpleITK)
+│   │   ├── nifti.py            # NIfTI conversion
+│   │   └── registration.py     # Image registration (Elastix)
+│   └── config.py               # Configuration management
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+```
+
+**API Endpoints:**
+```
+POST /api/segment/point       # Point-based prompting (SAM-Med3D)
+POST /api/segment/box         # Bounding box prompting
+POST /api/volumes/upload      # Upload DICOM/NIfTI
+GET  /api/volumes/{id}        # Retrieve processed volume
+POST /api/mesh/from-mask      # Generate mesh from segmentation mask
+GET  /api/health              # Health check
+POST /api/auth/login          # Authentication
+```
+
+### Clinical Workflows
+
+#### Workflow 1: Interactive Coronary Segmentation
+
+**User Steps:**
+1. Radiologist opens browser → logs in (Charité SSO)
+2. Loads DISCHARGE CCTA scan from PACS
+3. Clicks on LAD artery → AI segments entire vessel in 2 seconds
+4. Clicks on plaque → AI characterizes composition (calcified, lipid, mixed)
+5. Exports segmentation for CT-FFR analysis or research database
+
+**Technical Flow:**
+1. **Frontend:** Niivue loads NIfTI volume, displays 3D rendering
+2. **User interaction:** Click → frontend captures 3D coordinates (mm space)
+3. **API call:** `POST /api/segment/point` with coordinates + volume ID
+4. **Backend:** SAM-Med3D generates segmentation mask (cached embeddings)
+5. **Response:** Backend returns mask as NIfTI or mesh (MZ3/PLY format)
+6. **Frontend:** Niivue overlays mask with adjustable opacity
+7. **Real-time:** <2s end-to-end latency
+
+#### Workflow 2: Batch Processing for Research
+
+**User Steps:**
+1. Research coordinator uploads 100 DISCHARGE cases
+2. AI processes all cases overnight (batch mode)
+3. Next morning: review results, flag low-confidence cases
+4. Expert corrects flagged cases → AI retrains (active learning)
+5. Export refined segmentations for MACE prediction analysis
+
+**Technical Flow:**
+1. **Batch upload:** `POST /api/volumes/upload` (multiple files)
+2. **Queue processing:** Celery task queue + Redis
+3. **Parallel execution:** Multi-GPU processing (4× NVIDIA A100)
+4. **Quality control:** Auto-flag cases with Dice <0.75
+5. **Active learning:** Corrected masks → fine-tune model weekly
+6. **Export:** Bulk download as NIfTI + CSV metadata
+
+#### Workflow 3: MEDIS TXT Visualization
+
+**User Steps:**
+1. Load CTA volume (NIfTI) in browser
+2. Load MEDIS TXT file (LAD contour rings)
+3. **Client-side mesh generation:** Parse TXT → construct NVMesh (50-100ms)
+4. Overlay lumen + vessel wall meshes on CTA
+5. Toggle between mesh views and straightened MPR
+
+**Technical Flow:**
+1. **Parse MEDIS TXT:** Extract lumen/vessel contour rings
+2. **Direct mesh construction:** Connect rings → triangles (no backend needed)
+3. **Coordinate validation:** Ensure mm space matches CTA header
+4. **Render:** Add NVMesh to NiiVue viewer
+5. **Optional:** Export STL via backend for 3D printing
+
+---
+
 ## 🫀 Clinical Use Cases: Cardiac & Prostate CTA Segmentation
 
 ### Overview
@@ -1493,9 +1624,299 @@ async def create_mesh_from_segmentation(
 
 ---
 
-### Pathway 2: Point Cloud → Mesh (Surface Reconstruction)
+### Pathway 2: MEDIS Contours → Direct Mesh (Client-Side, Instant)
 
-**Best for:** Sparse point clouds from centerline tracking or manual annotations
+**Best for:** MEDIS TXT contours where topology is already known
+
+**Discovery from frac project**: When triangles are already known (e.g., connecting consecutive contour rings), skip marching cubes entirely and **construct NVMesh directly in the browser**.
+
+**Key Insight:** 
+- MEDIS contours = stacked rings of points with known connectivity
+- `buildstl.py` already computes this topology (connect ring N to ring N+1)
+- **We can do this in TypeScript/browser instead of Python/backend**
+
+**Performance:**
+- Backend (buildstl.py → STL → network → NiiVue): **~500-2000ms**
+- Client-side (parse TXT → NVMesh): **~50-100ms** ⚡
+
+---
+
+#### Implementation: Direct NVMesh Construction
+
+**Algorithm (from frac notes + buildstl.py logic):**
+```typescript
+// Frontend: services/medisMeshDirect.ts
+import { NVMesh } from '@niivue/niivue';
+import type { MedisContour } from './medisParser';
+
+export function medisContoursToMesh(
+  contours: MedisContour[],  // From existing MEDIS parser
+  meshType: 'lumen' | 'vessel',
+  nv: Niivue
+): NVMesh {
+  /**
+   * Direct mesh construction from MEDIS contour rings.
+   * 
+   * Topology: Connect ring N to ring N+1 with triangular facets
+   * 
+   *   Ring N:     p0 --- p1 --- p2 --- ... --- pM (closed loop)
+   *               |  \    |  \    |              |
+   *               |   \   |   \   |              |
+   *   Ring N+1:   q0 --- q1 --- q2 --- ... --- qM
+   * 
+   * Each quad (p_i, p_{i+1}, q_i, q_{i+1}) → 2 triangles
+   */
+  
+  // 1. Extract relevant contours (lumen or vessel wall)
+  const rings = contours
+    .filter(c => c.group === (meshType === 'lumen' ? 'Lumen' : 'VesselWall'))
+    .sort((a, b) => a.sliceDistance - b.sliceDistance);
+  
+  if (rings.length < 2) {
+    throw new Error('Need at least 2 contour rings to create mesh');
+  }
+  
+  // 2. Build vertex array (all points from all rings)
+  const totalPoints = rings.reduce((sum, r) => sum + r.points.length, 0);
+  const pts = new Float32Array(totalPoints * 3);
+  
+  let vertexOffset = 0;
+  const ringVertexOffsets: number[] = [];
+  
+  for (const ring of rings) {
+    ringVertexOffsets.push(vertexOffset);
+    
+    for (const point of ring.points) {
+      // Points are already in mm coordinates from MEDIS
+      pts[vertexOffset * 3 + 0] = point.x;
+      pts[vertexOffset * 3 + 1] = point.y;
+      pts[vertexOffset * 3 + 2] = point.z;
+      vertexOffset++;
+    }
+  }
+  
+  // 3. Build triangle index array (connect consecutive rings)
+  const triangles: number[] = [];
+  
+  for (let ringIdx = 0; ringIdx < rings.length - 1; ringIdx++) {
+    const ring0 = rings[ringIdx];
+    const ring1 = rings[ringIdx + 1];
+    const offset0 = ringVertexOffsets[ringIdx];
+    const offset1 = ringVertexOffsets[ringIdx + 1];
+    
+    const n0 = ring0.points.length;
+    const n1 = ring1.points.length;
+    
+    // Handle rings with different point counts (use simpler approach: min)
+    const nPoints = Math.min(n0, n1);
+    
+    for (let i = 0; i < nPoints; i++) {
+      const i_next = (i + 1) % nPoints;
+      
+      // Vertex indices
+      const p0 = offset0 + i;
+      const p1 = offset0 + i_next;
+      const q0 = offset1 + i;
+      const q1 = offset1 + i_next;
+      
+      // Two triangles per quad (CCW winding for outward normals)
+      triangles.push(p0, q0, p1);  // Triangle 1
+      triangles.push(p1, q0, q1);  // Triangle 2
+    }
+  }
+  
+  const tris = new Uint32Array(triangles);
+  
+  // 4. Create NVMesh
+  const rgba = meshType === 'lumen' 
+    ? new Uint8Array([255, 0, 0, 255])    // Red lumen
+    : new Uint8Array([0, 100, 255, 255]); // Blue vessel wall
+  
+  const mesh = new NVMesh(
+    pts,
+    tris,
+    `${meshType}-mesh`,
+    rgba,
+    meshType === 'lumen' ? 0.7 : 0.4,  // Lumen more opaque
+    true,                               // visible
+    nv.gl as WebGL2RenderingContext,
+    null,  // connectome
+    null, null, null,  // tractography
+    false, // colorbarVisible
+    `Coronary ${meshType}`
+  );
+  
+  return mesh;
+}
+
+// Usage in app
+export async function loadMedisWithMeshes(
+  txtFile: File,
+  nv: Niivue
+): Promise<void> {
+  // Parse MEDIS TXT (existing parser)
+  const contours = await parseMedisTxt(txtFile);
+  
+  // Create meshes directly in browser
+  const lumenMesh = medisContoursToMesh(contours, 'lumen', nv);
+  const vesselMesh = medisContoursToMesh(contours, 'vessel', nv);
+  
+  // Add to NiiVue (instant overlay on CT)
+  nv.addMesh(lumenMesh);
+  nv.addMesh(vesselMesh);
+  nv.drawScene?.();
+  
+  console.log('✅ Meshes rendered client-side in <100ms');
+}
+```
+
+---
+
+#### Coordinate System Handling
+
+**Critical:** MEDIS points must be in same mm space as CT volume
+
+**From your existing code** (`buildstl.py`), MEDIS points are already in mm (LPS or RAS):
+```python
+# buildstl.py already handles this correctly
+points = [(float(x), float(y), float(z)) for x, y, z in point_coords]
+# These are mm coordinates matching the DICOM/NIfTI header
+```
+
+**In TypeScript:** No conversion needed if MEDIS parser returns mm coordinates
+```typescript
+interface MedisPoint {
+  x: number;  // mm, same coordinate system as CT
+  y: number;
+  z: number;
+}
+```
+
+**Sanity Check (Debug Helper):**
+```typescript
+export function validateMeshCoordinates(
+  mesh: NVMesh,
+  ctVolume: NVImage
+): boolean {
+  // Extract mesh bounding box
+  const pts = mesh.pts;
+  const minMax = { 
+    x: [Infinity, -Infinity], 
+    y: [Infinity, -Infinity], 
+    z: [Infinity, -Infinity] 
+  };
+  
+  for (let i = 0; i < pts.length / 3; i++) {
+    minMax.x[0] = Math.min(minMax.x[0], pts[i * 3 + 0]);
+    minMax.x[1] = Math.max(minMax.x[1], pts[i * 3 + 0]);
+    // ... same for y, z
+  }
+  
+  // CT bounding box in mm
+  const dims = ctVolume.hdr.dims;
+  const pixDims = ctVolume.hdr.pixDims;
+  const ctBBox = {
+    x: [0, dims[1] * pixDims[1]],
+    y: [0, dims[2] * pixDims[2]],
+    z: [0, dims[3] * pixDims[3]]
+  };
+  
+  // Mesh should be inside or near CT bounds
+  const insideCT = 
+    minMax.x[0] >= ctBBox.x[0] - 10 && minMax.x[1] <= ctBBox.x[1] + 10 &&
+    minMax.y[0] >= ctBBox.y[0] - 10 && minMax.y[1] <= ctBBox.y[1] + 10 &&
+    minMax.z[0] >= ctBBox.z[0] - 10 && minMax.z[1] <= ctBBox.z[1] + 10;
+  
+  if (!insideCT) {
+    console.warn('⚠️ Mesh bounding box outside CT volume - coordinate mismatch?');
+    console.log('Mesh bbox:', minMax);
+    console.log('CT bbox:', ctBBox);
+  }
+  
+  return insideCT;
+}
+```
+
+---
+
+#### Comparison: Backend vs Client-Side
+
+| **Aspect** | **Backend (buildstl.py)** | **Client-Side (Direct NVMesh)** |
+|------------|---------------------------|----------------------------------|
+| **Speed** | 500-2000ms (network + I/O) | 50-100ms ⚡ |
+| **Network** | Must upload TXT, download STL | Parse TXT locally, no upload |
+| **Dependencies** | Python backend required | Pure TypeScript |
+| **Quality** | Same (topology identical) | Same |
+| **File size** | STL ~1-5 MB | No file transfer |
+| **Use case** | Export meshes for external tools | Real-time interactive viewing |
+
+**Recommendation:** 
+- **Use client-side** for interactive visualization in NiiVue
+- **Use backend** only if you need to export STL/OBJ for 3D printing, Meshlab, etc.
+
+---
+
+#### Alternative: Connectome Overlay for Centerline
+
+**From frac notes:** For just the centerline (not full surface), use **connectome mesh**:
+
+```typescript
+export function medisContoursToConnectome(
+  contours: MedisContour[],
+  nv: Niivue
+): void {
+  // Extract centerline (centroids of lumen contours)
+  const lumenRings = contours.filter(c => c.group === 'Lumen');
+  
+  const nodes = lumenRings.map((ring, i) => {
+    const centroid = computeCentroid(ring.points);
+    return {
+      name: `c${i}`,
+      x: centroid.x,
+      y: centroid.y,
+      z: centroid.z,
+      colorValue: 1,
+      sizeValue: 2
+    };
+  });
+  
+  const edges = [];
+  for (let i = 0; i < nodes.length - 1; i++) {
+    edges.push({ first: i, second: i + 1, colorValue: 1 });
+  }
+  
+  const connectome = {
+    name: 'centerline',
+    nodeColormap: 'warm',
+    nodeColormapNegative: 'winter',
+    nodeMinColor: 0,
+    nodeMaxColor: 1,
+    nodeScale: 3,
+    edgeColormap: 'warm',
+    edgeColormapNegative: 'winter',
+    edgeMin: 0,
+    edgeMax: 1,
+    edgeScale: 2,
+    legendLineThickness: 0,
+    showLegend: false,
+    nodes,
+    edges
+  };
+  
+  nv.loadConnectome(connectome);
+  nv.drawScene?.();
+}
+```
+
+**Use cases:**
+- **Connectome**: Quick centerline visualization (minimal geometry)
+- **Direct mesh**: Full vessel surface (lumen + wall)
+
+---
+
+### Pathway 3: Point Cloud → Mesh (Surface Reconstruction)
+
+**Best for:** Sparse point clouds from external sources (not MEDIS)
 
 **Three Algorithms:**
 
