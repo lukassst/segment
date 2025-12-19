@@ -499,6 +499,77 @@ For every point on the centerline, segment:
 1. **Lumen boundary** (inner wall, blood pool)
 2. **Outer wall boundary** (includes plaque)
 
+### Strategy: Polar Transform + Dynamic Programming
+
+For your requirement—segmenting both the inner (lumen) and outer (adventitia) vessel walls along a centerline, specifically handling calcified and soft plaque, without commercial tools—the **Polar Transform + Graph Search (Dynamic Programming)** method is the industry standard "best practice" for robust implementation.
+
+This approach transforms the difficult problem of "finding a circle in 2D" into the much easier problem of "finding a line in a graph."
+
+#### The Concept
+Instead of trying to fit a circle to the vessel in the original image slice (which gets messy with plaque), we "unwrap" the vessel image around the centerline.
+*   **In Cartesian space:** The vessel walls are closed loops.
+*   **In Polar space:** The vessel walls become roughly horizontal lines.
+*   **The Goal:** Find the optimal path (line) from the left side of the image to the right.
+
+---
+
+#### Algorithm Overview
+
+**1. Multi-Planar Reformation (MPR)**
+*   **Goal:** Isolate the cross-section.
+*   **Input:** 3D Volume + Centerline point + Tangent vector.
+*   **Action:** Extract a 2D plane perpendicular to the centerline at each point.
+*   **Result:** A stack of 2D images where the vessel is (roughly) a circle in the center.
+
+**2. The Polar Transform ("Unwrapping")**
+*   **Goal:** Linearize the problem.
+*   **Action:** Sample the 2D MPR slice using polar coordinates $(r, \theta)$.
+    *   $\theta$ (x-axis): 0 to 360 degrees.
+    *   $r$ (y-axis): Distance from center (e.g., 0 to 5mm).
+*   **Result:** A rectangular image.
+    *   Top of image = Center of vessel.
+    *   Bottom of image = Periphery.
+    *   **Lumen boundary:** A wavy horizontal line near the top.
+    *   **Outer wall:** A wavy horizontal line further down.
+
+**3. Gradient & Cost Function Calculation**
+*   **Goal:** define where the "walls" likely are.
+You need two different cost maps: one for the Lumen, one for the Outer Wall.
+
+*   **Lumen Cost Map:** Look for the transition from **Bright** (Contrast) $\rightarrow$ **Darker** (Plaque/Wall).
+    *   *Simple Gradient:* Directional derivative along the radius.
+    *   *Calcification Handling:* If a pixel is "Calcium Bright" (>600 HU), the gradient is misleading. You must add a "penalty" term to prevent the boundary from cutting *through* the calcium. The lumen boundary should wrap *around* the calcium (calcium is usually in the wall).
+
+*   **Outer Wall Cost Map:** Look for the transition from **Gray** (Media/Adventitia) $\rightarrow$ **Dark** (Epicardial Fat).
+    *   This gradient is weaker and noisier. It relies heavily on the "smoothness" constraint from the graph search.
+
+**4. Optimal Path Search (Dynamic Programming)**
+*   **Goal:** Find the best lines.
+You can use **Dijkstra's Algorithm** or a simple **Viterbi (Dynamic Programming)** solver.
+
+*   **Nodes:** Every pixel in the polar image.
+*   **Edges:** Connect pixel $(x, y)$ to $(x+1, y)$, $(x+1, y-1)$, and $(x+1, y+1)$.
+*   **Weights:** Based on the Cost Map (Low cost = high gradient).
+*   **Constraint 1 (Smoothness):** The path cannot jump too many pixels in $r$ (radius) for a single step in $\theta$ (angle).
+*   **Constraint 2 (Closed Loop):** The $r$ value at $\theta=0$ must match the $r$ value at $\theta=360$.
+*   **Constraint 3 (Nested Surfaces):** The Outer Wall must always have a radius $r_{outer} \ge r_{lumen}$.
+
+#### Why This is the "Best Option"
+
+1.  **Global Optimum:** Unlike "Snake" or "Level Set" algorithms, which iterate and can get stuck on local noise (like a spot of calcium), Dynamic Programming guarantees finding the mathematically *best* path through the slice based on your cost function.
+2.  **Plaque Robustness:**
+    *   **Soft Plaque:** It appears as a gray zone between the bright lumen and the outer wall. By searching for two distinct surfaces (Inner and Outer), you explicitly capture the plaque burden (area between lines).
+    *   **Calcified Plaque:** By converting to polar coordinates, the calcium "bloom" becomes a distinct high-intensity block. You can easily adjust your cost function to "ride the edge" of the high-intensity block rather than getting confused by it.
+3.  **Feasibility:** This does not require complex solvers. It relies on basic image resampling and standard graph search, both available in `scipy`, `scikit-image`, and `networkx`.
+
+#### Python Toolkit Strategy
+
+*   **`scipy.ndimage.map_coordinates`**: For creating the MPR and Polar transforms (fast interpolation).
+*   **`skimage.filters.sobel`**: For calculating gradients (edges).
+*   **`numpy`**: For building the cost accumulation matrix (the Dynamic Programming step).
+
+---
+
 ### Step 3.1: Resample Centerline
 
 ```python

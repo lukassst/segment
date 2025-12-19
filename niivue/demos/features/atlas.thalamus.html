@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Thalamic Atlas </title>
+    <link rel="stylesheet" href="niivue.css" />
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+  </head>
+    <header>
+      <label for="paqdSelect">Voxel</label>
+      <select id="paqdSelect">
+        <option>Transparent</option>
+        <option selected>Rim</option>
+        <option>Opaque</option>
+        <option>Translucent</option>
+      </select>
+      &nbsp;
+      <button id="clipBtn">Clip</button>
+      &nbsp;
+      <button id="aboutBtn">About</button>
+    </header>
+    <main id="canvas-container">
+      <div style="display: flex; width: 100%; height: 100%">
+        <canvas id="gl1"></canvas>
+      </div>
+    </main>
+    <footer>
+      <label id="statusBar">&nbsp; </label>
+    </footer>
+</html>
+<script type="module" async>
+  import * as niivue from "../dist/index.js"
+  paqdSelect.onchange = function () {
+    const index = this.selectedIndex
+    // 2 default opaque
+    let paqdUniforms =[0.3, 0.6, 0.5, 1.0]
+    if (index % 4 === 0) //transparent
+      paqdUniforms = [0.5, 0.9, 0.0, 0.0]
+    if (index % 4 === 1) //rim
+      paqdUniforms = [0.5, 0.9, 1.0, 0.2]
+    if (index % 4 === 3) //translucent
+      paqdUniforms = [0.3, 0.5, 0.25, 0.4]
+    nv1.opts.paqdUniforms = paqdUniforms
+    nv1.updateGLVolume()
+  }
+  aboutBtn.onclick = function () {
+     window.alert("Najdenovska probabilistic atlas of thalamic nuclei PMID: 30480664")
+  }
+  clipBtn.onclick = function() {
+    const depth = nv1.scene.clipPlaneDepthAziElev[0]
+    if (depth >= 1.0) {
+      nv1.setClipPlane([0.0, 180, 30])
+    } else {
+      nv1.setClipPlane([2, 180, 30])
+    }
+  }
+  var volumeList1 = [
+    { url: "https://niivue.github.io/niivue-demo-images/Thalamus/ICBM2009asym.nii.gz" },
+    { url: "https://niivue.github.io/niivue-demo-images/Thalamus/Thalamus_Nuclei-HCP-4DSPAMs_paqd.nii.gz" },
+  ]
+  const onLocationChange = (data) => {
+    statusBar.innerHTML = data.string
+  }
+  let defaults = {
+    show3Dcrosshair: true,
+    onLocationChange: onLocationChange,
+    backColor: [0.1, 0.1, 0.2, 1],
+  }
+  var nv1 = new niivue.Niivue(defaults)
+  nv1.opts.multiplanarForceRender = true
+  await nv1.attachToCanvas(gl1)
+  nv1.opts.multiplanarShowRender = niivue.SHOW_RENDER.ALWAYS
+  await nv1.loadVolumes(volumeList1)
+  async function fetchJSON(fnm) {
+    const response = await fetch(fnm)
+    const js = await response.json()
+    return js
+  }
+  let cmap = await fetchJSON("https://niivue.github.io/niivue-demo-images/Thalamus/Thalamic_Nuclei-ColorLUT.json")
+  nv1.volumes[1].setColormapLabel(cmap)
+  nv1.opts.yoke3Dto2DZoom = true
+  nv1.opts.dragMode = nv1.dragModes.pan
+  paqdSelect.onchange()
+</script>
+
