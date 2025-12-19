@@ -1089,6 +1089,1029 @@ This implements the same FMM + refinement workflow.
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** 2025-12-18  
-**Project:** Classical Centerline Pipeline (FMM-based)
+## 🗂️ Phase 5: 3D Mesh Export & Visualization
+
+### The Coordinate System Problem
+
+When exporting vessel geometry for web visualization (Niivue), **format choice is critical** for spatial alignment.
+
+**Your segmentation data contains absolute scanner coordinates** (e.g., $z \approx 1967$ mm). The export format must preserve this spatial reference.
+
+### Format Comparison: STL vs GIfTI vs MZ3
+
+| **Format** | **Coordinates** | **Metadata** | **Niivue Support** | **Use Case** |
+|------------|-----------------|--------------|--------------------|--------------|
+| **STL** | ❌ No header for world coords | ❌ None | ⚠️ May float "beside" volume | Quick prototyping only |
+| **GIfTI (.gii)** | ✅ Preserves RAS/LPS | ✅ XML metadata | ✅ Native alignment | **Recommended for medical** |
+| **MZ3** | ✅ Binary coords | ✅ Layer attributes | ✅ High performance | Large meshes, color mapping |
+
+### Why STL is Problematic for Medical Imaging
+
+```
+Problem: STL files store raw vertex coordinates without:
+  1. Origin reference (where is 0,0,0?)
+  2. Coordinate system (RAS vs LPS vs scanner coords)
+  3. Affine transformation matrix
+
+Result: Mesh "floats" next to the CTA instead of overlaying correctly.
+```
+
+### Why GIfTI is the Correct Choice
+
+**GIfTI (Geometry format for GIFTI)** is the "NIfTI for surfaces":
+
+1. **Coordinate Preservation:** Stores vertices in world coordinates (same as your CTA NIfTI)
+2. **Metadata Support:** Embeds StudyInstanceUID, VesselName, etc. in XML header
+3. **Niivue Native:** Automatically aligns with loaded NIfTI volumes
+4. **Dual Array Structure:**
+   - `NIFTI_INTENT_POINTSET`: Vertex positions (Nx3 float32)
+   - `NIFTI_INTENT_TRIANGLE`: Face indices (Mx3 int32)
+
+### The Lofting Algorithm: Contours → Tube Mesh
+
+**Problem:** Segmentation output is a series of 2D contours (closed rings of points per slice).
+
+**Solution:** "Lofting" connects adjacent contours into a continuous 3D surface.
+
+```
+Slice n:     ●─●─●─●─●  (ring of points)
+             │╲│╲│╲│╲│  ← triangles connect to next slice
+Slice n+1:   ●─●─●─●─●  (ring of points)
+```
+
+**Triangulation Logic:**
+```
+For each contour pair (slice n, slice n+1):
+  For each point index i:
+    p1 = slice[n][i]
+    p2 = slice[n][(i+1) % points_per_contour]  # wrap around
+    p3 = slice[n+1][i]
+    p4 = slice[n+1][(i+1) % points_per_contour]
+    
+    # Two triangles form a quad
+    face1 = [p1, p2, p3]  # CCW winding for correct normals
+    face2 = [p2, p4, p3]
+```
+
+**⚠️ Face Winding Order:** Counter-clockwise (CCW) winding is critical. WebGL uses backface culling—wrong winding makes triangles invisible from one side.
+
+---
+
+## 🐍 Phase 6: Python Conversion Pipeline (TXT → GIfTI)
+
+### Overview
+
+This pipeline converts MEDIS-format contour text files into GIfTI meshes for Niivue visualization.
+
+**Dependencies:**
+```bash
+pip install nibabel numpy SimpleITK
+```
+
+### Complete Conversion Script
+
+```python
+import numpy as np
+import nibabel as nib
+from nibabel.gifti import GiftiImage, GiftiDataArray, GiftiMetaData
+import SimpleITK as sitk
+import os
+import re
+
+def parse_medis_contour_file(filepath: str) -> tuple:
+    """
+    Parse MEDIS-format contour file with Lumen and VesselWall groups.
+    
+    Returns:
+        segments: {'Lumen': [...], 'VesselWall': [...]}
+        metadata: {'vessel_name': 'lad', 'patient_id': '...', ...}
+    """
+    segments = {'Lumen': [], 'VesselWall': []}
+    metadata = {}
+    
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+    
+    current_group = None
+    points_expected = 0
+    points_collected = 0
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Parse metadata headers
+        if line.startswith('# vessel_name'):
+            metadata['vessel_name'] = line.split(':')[1].strip()
+        elif line.startswith('# patient_id'):
+            metadata['patient_id'] = line.split(':')[1].strip()
+        elif line.startswith('# study_description'):
+            metadata['study_description'] = line.split(':')[1].strip()
+        elif line.startswith('# group:'):
+            current_group = line.split(':')[1].strip()
+            points_collected = 0
+        elif line.startswith('# Number of points:'):
+            points_expected = int(line.split(':')[1].strip())
+        elif line.startswith('# SliceDistance:'):
+            metadata['slice_distance'] = float(line.split(':')[1].strip())
+        
+        # Parse coordinate data
+        elif line and not line.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    point = [float(parts[0]), float(parts[1]), float(parts[2])]
+                    if current_group in segments:
+                        segments[current_group].append(point)
+                        points_collected += 1
+                except ValueError:
+                    continue
+    
+    return segments, metadata
+
+
+def create_lofted_mesh(points: list, points_per_contour: int = 40) -> tuple:
+    """
+    Create triangulated mesh from stacked contours via lofting.
+    
+    Args:
+        points: Flat list of 3D points (all contours concatenated)
+        points_per_contour: Number of points per ring (from file metadata)
+    
+    Returns:
+        vertices: Nx3 float32 array
+        faces: Mx3 int32 array (triangle indices)
+    """
+    if len(points) < points_per_contour * 2:
+        raise ValueError(f"Need at least 2 contours, got {len(points)} points")
+    
+    num_contours = len(points) // points_per_contour
+    vertices = np.array(points, dtype=np.float32)
+    faces = []
+    
+    for c in range(num_contours - 1):
+        for p in range(points_per_contour):
+            # Current contour indices
+            p1 = c * points_per_contour + p
+            p2 = c * points_per_contour + (p + 1) % points_per_contour
+            
+            # Next contour indices
+            p3 = (c + 1) * points_per_contour + p
+            p4 = (c + 1) * points_per_contour + (p + 1) % points_per_contour
+            
+            # Two triangles per quad (CCW winding for correct normals)
+            faces.append([p1, p2, p3])
+            faces.append([p2, p4, p3])
+    
+    return vertices, np.array(faces, dtype=np.int32)
+
+
+def convert_contours_to_gifti(
+    txt_path: str,
+    output_dir: str,
+    nifti_reference_path: str = None,
+    points_per_contour: int = 40
+) -> list:
+    """
+    Convert MEDIS contour file to GIfTI mesh files.
+    
+    Creates separate .gii files for Lumen and VesselWall.
+    
+    Args:
+        txt_path: Path to MEDIS contour .txt file
+        output_dir: Directory for output .gii files
+        nifti_reference_path: Optional CTA volume for StudyInstanceUID
+        points_per_contour: Points per ring (check file header)
+    
+    Returns:
+        List of created .gii file paths
+    """
+    # Parse input file
+    segments, txt_meta = parse_medis_contour_file(txt_path)
+    base_name = os.path.splitext(os.path.basename(txt_path))[0]
+    
+    # Get reference metadata if available
+    study_uid = "Unknown"
+    if nifti_reference_path and os.path.exists(nifti_reference_path):
+        try:
+            ref_img = sitk.ReadImage(nifti_reference_path)
+            if ref_img.HasMetaDataKey("0020|000d"):
+                study_uid = ref_img.GetMetaData("0020|000d")
+        except Exception as e:
+            print(f"Warning: Could not read NIfTI metadata: {e}")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    output_files = []
+    
+    for group_name, points in segments.items():
+        if not points or len(points) < points_per_contour * 2:
+            print(f"Skipping {group_name}: insufficient points")
+            continue
+        
+        try:
+            vertices, faces = create_lofted_mesh(points, points_per_contour)
+        except ValueError as e:
+            print(f"Skipping {group_name}: {e}")
+            continue
+        
+        # Create GIfTI data arrays
+        vertex_array = GiftiDataArray(
+            data=vertices,
+            intent='NIFTI_INTENT_POINTSET',
+            datatype='NIFTI_TYPE_FLOAT32'
+        )
+        face_array = GiftiDataArray(
+            data=faces,
+            intent='NIFTI_INTENT_TRIANGLE',
+            datatype='NIFTI_TYPE_INT32'
+        )
+        
+        # Embed metadata in GIfTI header
+        gii_metadata = GiftiMetaData({
+            'StudyInstanceUID': study_uid,
+            'VesselName': txt_meta.get('vessel_name', 'Unknown'),
+            'PatientID': txt_meta.get('patient_id', 'Unknown'),
+            'Group': group_name,
+            'SliceDistance': str(txt_meta.get('slice_distance', 0.25)),
+            'PointsPerContour': str(points_per_contour),
+            'ConvertedBy': 'VesselSegmenter-Pipeline'
+        })
+        
+        # Create and save GIfTI image
+        gii = GiftiImage(darrays=[vertex_array, face_array], meta=gii_metadata)
+        
+        output_path = os.path.join(output_dir, f"{base_name}_{group_name}.gii")
+        nib.save(gii, output_path)
+        output_files.append(output_path)
+        print(f"✓ Exported: {output_path} ({len(vertices)} vertices, {len(faces)} faces)")
+    
+    return output_files
+
+
+# Usage Example
+if __name__ == "__main__":
+    convert_contours_to_gifti(
+        txt_path='01-BER-0088_ecrf_lad.txt',
+        output_dir='./dist/meshes',
+        nifti_reference_path='cta_volume.nii.gz',
+        points_per_contour=40
+    )
+```
+
+### Coordinate System Conventions
+
+**Critical:** Ensure your contour coordinates match the CTA's coordinate system:
+
+| **System** | **X** | **Y** | **Z** | **Used By** |
+|------------|-------|-------|-------|-------------|
+| **RAS** | Right→Left | Anterior→Posterior | Inferior→Superior | NIfTI, Niivue |
+| **LPS** | Left→Right | Posterior→Anterior | Inferior→Superior | DICOM, ITK |
+| **Scanner** | Varies | Varies | Table position | Raw DICOM |
+
+**If mesh appears mirrored or offset:** Check if coordinate transformation is needed:
+```python
+# LPS to RAS conversion (flip X and Y)
+vertices_ras = vertices.copy()
+vertices_ras[:, 0] *= -1  # Flip X
+vertices_ras[:, 1] *= -1  # Flip Y
+```
+
+---
+
+## 🔀 Phase 7: Dual Representation Strategy (Mesh + JSON)
+
+### Architectural Principle: Single Source of Truth, Multiple Representations
+
+For professional medical visualization, maintain **two complementary representations**:
+
+| **Representation** | **Format** | **Purpose** | **Precision** |
+|--------------------|------------|-------------|---------------|
+| **Geometric Mesh** | GIfTI (.gii) | Smooth 3D surface visualization | Interpolated (lofted) |
+| **Point Cloud** | JSON (Connectome) | Raw measurement data | Ground truth |
+
+### Why Both Are Needed
+
+1. **Analytical vs Visual Precision:**
+   - Mesh: Beautiful for 3D rendering, but lofting interpolates between measurements
+   - JSON: Shows exact measurement points without interpolation
+
+2. **Debugging:**
+   - If mesh looks "twisted", JSON helps identify if error is in raw data or triangulation
+
+3. **Interactive Features:**
+   - Click individual points to show HU values
+   - Measure diameters between nodes
+   - Dynamic coloring based on stenosis grade
+
+4. **Performance:**
+   - JSON loads instantly (show skeleton while heavy mesh loads)
+   - Can render thousands of points with per-point styling
+
+### Niivue Connectome JSON Format
+
+Niivue uses a specific JSON structure for point/line visualization:
+
+```json
+{
+  "nodes": {
+    "x": [6.15, 6.10, 6.03, ...],
+    "y": [-0.09, -0.22, -0.35, ...],
+    "z": [1974.59, 1974.60, 1974.61, ...],
+    "colorValue": [1, 1, 1, ...],
+    "sizeValue": [1, 1, 1, ...]
+  },
+  "edges": {
+    "first": [0, 1, 2, ...],
+    "second": [1, 2, 3, ...]
+  },
+  "metadata": {
+    "vessel_type": "Lumen",
+    "source": "01-BER-0088_lad.txt"
+  }
+}
+```
+
+### Python Script: TXT → Niivue JSON
+
+```python
+import json
+import os
+import numpy as np
+
+def convert_contours_to_niivue_json(
+    txt_path: str,
+    output_json: str,
+    points_per_ring: int = 40
+) -> None:
+    """
+    Convert MEDIS contours to Niivue Connectome JSON format.
+    
+    Creates nodes (points) and edges (lines connecting ring points).
+    """
+    # Parse points (reuse parse function from above)
+    points = []
+    metadata = {}
+    
+    with open(txt_path, 'r') as f:
+        lines = f.readlines()
+    
+    current_group = None
+    for line in lines:
+        line = line.strip()
+        if line.startswith('# vessel_name'):
+            metadata['vessel_name'] = line.split(':')[1].strip()
+        elif line.startswith('# group:'):
+            current_group = line.split(':')[1].strip()
+        elif line.startswith('# Number of points:'):
+            points_per_ring = int(line.split(':')[1].strip())
+        elif line and not line.startswith('#') and current_group == 'Lumen':
+            parts = line.split()
+            if len(parts) >= 3:
+                points.append([float(parts[0]), float(parts[1]), float(parts[2])])
+    
+    if not points:
+        raise ValueError("No Lumen points found in file")
+    
+    # Build Niivue Connectome structure
+    nodes = {
+        "x": [p[0] for p in points],
+        "y": [p[1] for p in points],
+        "z": [p[2] for p in points],
+        "colorValue": [1.0] * len(points),  # Uniform color
+        "sizeValue": [1.0] * len(points)    # Uniform size
+    }
+    
+    # Create edges to form closed rings
+    edges = {"first": [], "second": []}
+    num_rings = len(points) // points_per_ring
+    
+    for r in range(num_rings):
+        offset = r * points_per_ring
+        for i in range(points_per_ring):
+            p1 = offset + i
+            p2 = offset + ((i + 1) % points_per_ring)  # Wrap to close ring
+            edges["first"].append(p1)
+            edges["second"].append(p2)
+    
+    # Optionally connect rings along vessel axis
+    for r in range(num_rings - 1):
+        for i in range(0, points_per_ring, 4):  # Every 4th point
+            p1 = r * points_per_ring + i
+            p2 = (r + 1) * points_per_ring + i
+            edges["first"].append(p1)
+            edges["second"].append(p2)
+    
+    data = {
+        "nodes": nodes,
+        "edges": edges,
+        "metadata": {
+            "vessel_type": "Lumen",
+            "vessel_name": metadata.get('vessel_name', 'Unknown'),
+            "source": os.path.basename(txt_path),
+            "num_rings": num_rings,
+            "points_per_ring": points_per_ring
+        }
+    }
+    
+    with open(output_json, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"✓ JSON point cloud created: {output_json}")
+    print(f"  Nodes: {len(points)}, Edges: {len(edges['first'])}")
+
+
+# Usage
+if __name__ == "__main__":
+    convert_contours_to_niivue_json(
+        '01-BER-0088_lad.txt',
+        'lad_points.json',
+        points_per_ring=40
+    )
+```
+
+### Visual Layering Strategy
+
+In Niivue, combine both representations:
+
+```
+Layer 1: CTA Volume (base)           - 100% opacity
+Layer 2: GIfTI Mesh (vessel wall)    - 30% opacity, gray
+Layer 3: GIfTI Mesh (lumen)          - 50% opacity, red  
+Layer 4: JSON Points (measurements)  - 100% opacity, bright dots
+```
+
+This shows smooth surface AND exact measurement locations simultaneously.
+
+---
+
+## 📐 Phase 8: Straightened Curved Planar Reconstruction (sCPR)
+
+### Conceptual Overview: The "Garden Hose" Analogy
+
+Imagine a **tangled garden hose** (the coronary artery). To inspect for cracks (stenosis, calcifications), looking at standard axial CT slices is difficult—the vessel curves in and out of every slice.
+
+**sCPR mathematically "pulls the hose straight":**
+- Transform from global Cartesian $(x, y, z)$ to vessel-centric $(s, u, v)$
+- $s$ = distance along centerline ("length of hose")
+- $(u, v)$ = cross-sectional coordinates ("looking down the hose")
+
+**Result:** A new 3D volume where clinicians scroll along the vessel from ostium to distal end as if it were a straight pipe.
+
+### Mathematical Foundation
+
+#### A. Local Coordinate Frame at Each Centerline Point
+
+For each centerline point $P_i$, we need an orthonormal basis $(\vec{T}_i, \vec{N}_i, \vec{B}_i)$:
+
+| **Vector** | **Name** | **Direction** |
+|------------|----------|---------------|
+| $\vec{T}$ | Tangent | Along vessel ("forward") |
+| $\vec{N}$ | Normal | Perpendicular ("up" in cross-section) |
+| $\vec{B}$ | Binormal | Perpendicular ("right" in cross-section) |
+
+#### B. Calculating the Tangent Vector $\vec{T}$
+
+Use **central difference** for smooth tangent estimation:
+
+$$\vec{T}_i = \text{normalize}(P_{i+1} - P_{i-1})$$
+
+**Boundary conditions:**
+- First point ($i=0$): Forward difference $\vec{T}_0 = \text{normalize}(P_1 - P_0)$
+- Last point ($i=N-1$): Backward difference $\vec{T}_{N-1} = \text{normalize}(P_{N-1} - P_{N-2})$
+
+```python
+def compute_tangent_vectors(centerline: np.ndarray) -> np.ndarray:
+    """
+    Compute tangent vectors using central differences.
+    
+    Args:
+        centerline: Nx3 array of centerline points
+    
+    Returns:
+        tangents: Nx3 array of unit tangent vectors
+    """
+    n = len(centerline)
+    tangents = np.zeros_like(centerline)
+    
+    # Central difference for interior points
+    tangents[1:-1] = centerline[2:] - centerline[:-2]
+    
+    # Forward difference for first point
+    tangents[0] = centerline[1] - centerline[0]
+    
+    # Backward difference for last point
+    tangents[-1] = centerline[-1] - centerline[-2]
+    
+    # Normalize
+    norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+    tangents = tangents / (norms + 1e-10)
+    
+    return tangents
+```
+
+#### C. The Twist Problem: Frenet-Serret vs Rotation Minimizing Frame
+
+**Problem with Frenet-Serret frame:**
+The standard Frenet frame uses curvature to define $\vec{N}$. At inflection points (where curvature changes sign), the frame **flips 180°**, causing spiral artifacts.
+
+**Solution: Rotation Minimizing Frame (RMF) / Bishop Frame**
+
+The RMF propagates the normal vector smoothly by projecting it onto each successive perpendicular plane:
+
+$$\vec{N}_i = \text{normalize}\left(\vec{N}_{i-1} - (\vec{N}_{i-1} \cdot \vec{T}_i)\vec{T}_i\right)$$
+
+$$\vec{B}_i = \vec{T}_i \times \vec{N}_i$$
+
+```python
+def compute_rotation_minimizing_frame(tangents: np.ndarray) -> tuple:
+    """
+    Compute Rotation Minimizing Frame (Bishop Frame).
+    
+    Avoids the "twist" problem of Frenet-Serret frames.
+    
+    Args:
+        tangents: Nx3 unit tangent vectors
+    
+    Returns:
+        normals: Nx3 unit normal vectors
+        binormals: Nx3 unit binormal vectors
+    """
+    n = len(tangents)
+    normals = np.zeros_like(tangents)
+    binormals = np.zeros_like(tangents)
+    
+    # Initialize: pick arbitrary vector perpendicular to first tangent
+    T0 = tangents[0]
+    
+    # Choose axis least aligned with tangent
+    if abs(T0[0]) <= abs(T0[1]) and abs(T0[0]) <= abs(T0[2]):
+        ref = np.array([1.0, 0.0, 0.0])
+    elif abs(T0[1]) <= abs(T0[2]):
+        ref = np.array([0.0, 1.0, 0.0])
+    else:
+        ref = np.array([0.0, 0.0, 1.0])
+    
+    # Initial normal via cross product
+    normals[0] = np.cross(T0, ref)
+    normals[0] /= np.linalg.norm(normals[0])
+    binormals[0] = np.cross(T0, normals[0])
+    
+    # Propagate frame along centerline
+    for i in range(1, n):
+        Ti = tangents[i]
+        Ni_prev = normals[i - 1]
+        
+        # Project previous normal onto plane perpendicular to current tangent
+        Ni = Ni_prev - np.dot(Ni_prev, Ti) * Ti
+        norm = np.linalg.norm(Ni)
+        
+        if norm < 1e-10:
+            # Degenerate case: use previous normal
+            Ni = Ni_prev
+        else:
+            Ni = Ni / norm
+        
+        normals[i] = Ni
+        binormals[i] = np.cross(Ti, Ni)
+    
+    return normals, binormals
+```
+
+#### D. The Resampling Mapping
+
+For pixel $(u, v)$ in cross-section $i$, the corresponding world coordinate is:
+
+$$W_{i,u,v} = P_i + (u \cdot \Delta_{res} \cdot \vec{N}_i) + (v \cdot \Delta_{res} \cdot \vec{B}_i)$$
+
+**Parameters:**
+- $P_i$: Centerline point (center of cross-section, $u=0, v=0$)
+- $\Delta_{res}$: Pixel resolution (typically 0.1–0.2 mm)
+- Slice spacing: `SliceDistance` from your data (e.g., 0.25 mm)
+
+```python
+def compute_scpr_coordinates(
+    centerline: np.ndarray,
+    normals: np.ndarray,
+    binormals: np.ndarray,
+    slice_size: int = 256,
+    pixel_resolution: float = 0.1  # mm per pixel
+) -> np.ndarray:
+    """
+    Compute world coordinates for sCPR volume.
+    
+    Args:
+        centerline: Nx3 centerline points
+        normals: Nx3 normal vectors (from RMF)
+        binormals: Nx3 binormal vectors (from RMF)
+        slice_size: Cross-section size in pixels (e.g., 256x256)
+        pixel_resolution: Physical size of each pixel in mm
+    
+    Returns:
+        world_coords: (N, slice_size, slice_size, 3) array of world coordinates
+    """
+    n_slices = len(centerline)
+    half_size = slice_size // 2
+    
+    # Create UV grid (centered at 0)
+    u_coords = np.arange(-half_size, half_size) * pixel_resolution
+    v_coords = np.arange(-half_size, half_size) * pixel_resolution
+    U, V = np.meshgrid(u_coords, v_coords, indexing='xy')
+    
+    # Output array: (n_slices, height, width, 3)
+    world_coords = np.zeros((n_slices, slice_size, slice_size, 3), dtype=np.float32)
+    
+    for i in range(n_slices):
+        P = centerline[i]
+        N = normals[i]
+        B = binormals[i]
+        
+        # W = P + u*N + v*B
+        for axis in range(3):
+            world_coords[i, :, :, axis] = (
+                P[axis] + 
+                U * N[axis] + 
+                V * B[axis]
+            )
+    
+    return world_coords
+```
+
+### Complete sCPR Pipeline
+
+```python
+from scipy.ndimage import map_coordinates
+
+def create_straightened_cpr(
+    volume: np.ndarray,
+    spacing: tuple,
+    centerline: np.ndarray,
+    slice_size: int = 256,
+    pixel_resolution: float = 0.1
+) -> np.ndarray:
+    """
+    Create Straightened Curved Planar Reconstruction.
+    
+    Args:
+        volume: 3D CTA volume
+        spacing: (sx, sy, sz) voxel spacing in mm
+        centerline: Nx3 centerline in world coordinates
+        slice_size: Output cross-section size
+        pixel_resolution: Output pixel size in mm
+    
+    Returns:
+        scpr_volume: (slice_size, slice_size, N) straightened volume
+    """
+    # Step 1: Compute frame
+    tangents = compute_tangent_vectors(centerline)
+    normals, binormals = compute_rotation_minimizing_frame(tangents)
+    
+    # Step 2: Compute world coordinates for each pixel
+    world_coords = compute_scpr_coordinates(
+        centerline, normals, binormals,
+        slice_size, pixel_resolution
+    )
+    
+    # Step 3: Convert world coords to voxel coords
+    voxel_coords = world_coords.copy()
+    for axis in range(3):
+        voxel_coords[..., axis] /= spacing[axis]
+    
+    # Step 4: Resample via trilinear interpolation
+    n_slices = len(centerline)
+    scpr_volume = np.zeros((slice_size, slice_size, n_slices), dtype=np.float32)
+    
+    for i in range(n_slices):
+        coords = [
+            voxel_coords[i, :, :, 0].ravel(),
+            voxel_coords[i, :, :, 1].ravel(),
+            voxel_coords[i, :, :, 2].ravel()
+        ]
+        
+        sampled = map_coordinates(
+            volume, coords,
+            order=1,  # Trilinear
+            mode='constant',
+            cval=0
+        )
+        
+        scpr_volume[:, :, i] = sampled.reshape(slice_size, slice_size)
+    
+    return scpr_volume
+```
+
+### Slice Spacing vs Thickness
+
+**Question:** "Is slice thickness = 2 × SliceDistance?"
+
+**Answer:** No. In a resampled volume:
+- **Slice Spacing (Z-dimension):** Equals `SliceDistance` (e.g., 0.25 mm)
+- **Voxel Thickness:** In digital volumes, voxels are point samples (infinitely thin)
+- **Slab MIP:** If doing Maximum Intensity Projection slabs, use 0.5–1.0 mm thickness
+
+For standard sCPR, set output NIfTI `pixdim[3] = SliceDistance`.
+
+---
+
+## 🌐 Phase 9: TypeScript / Niivue / Vite Integration
+
+### Project Structure
+
+```
+vessel-viewer/
+├── public/
+│   ├── volumes/
+│   │   └── cta.nii.gz           # CTA volume
+│   ├── meshes/
+│   │   ├── lad_Lumen.gii        # Lumen surface
+│   │   └── lad_VesselWall.gii   # Wall surface
+│   └── points/
+│       └── lad_points.json      # Connectome data
+├── src/
+│   ├── main.ts
+│   └── vessel-loader.ts
+├── index.html
+├── package.json
+└── vite.config.ts
+```
+
+### Loading GIfTI Meshes in Niivue
+
+```typescript
+import { Niivue } from '@niivue/niivue';
+
+async function initializeViewer(): Promise<void> {
+  const nv = new Niivue({
+    backColor: [0.1, 0.1, 0.1, 1],
+    show3Dcrosshair: true,
+  });
+  
+  await nv.attachToCanvas(document.getElementById('gl-canvas') as HTMLCanvasElement);
+  
+  // Load CTA volume as base
+  await nv.loadVolumes([
+    { url: '/volumes/cta.nii.gz' }
+  ]);
+  
+  // Load vessel meshes as overlays
+  const meshList = [
+    {
+      url: '/meshes/lad_VesselWall.gii',
+      rgba255: [200, 200, 200, 100],  // Semi-transparent gray
+      opacity: 0.3,
+      visible: true,
+      name: 'Vessel Wall'
+    },
+    {
+      url: '/meshes/lad_Lumen.gii',
+      rgba255: [255, 50, 50, 255],    // Bright red
+      opacity: 0.8,
+      visible: true,
+      name: 'Lumen'
+    }
+  ];
+  
+  await nv.loadMeshes(meshList);
+  
+  // Apply shader for better vessel visualization
+  if (nv.meshes.length > 0) {
+    nv.setMeshShader(nv.meshes[0].id, 'Matcap');
+    nv.setMeshShader(nv.meshes[1].id, 'Matcap');
+  }
+  
+  // Set 3D rendering mode
+  nv.setSliceType(nv.sliceTypeRender);
+}
+
+initializeViewer();
+```
+
+### Loading Point Cloud (Connectome JSON)
+
+```typescript
+async function loadPointCloud(nv: Niivue, jsonUrl: string): Promise<void> {
+  // Niivue loads connectome JSON as a special mesh type
+  await nv.loadConnectome(jsonUrl);
+  
+  // Configure point/line appearance
+  nv.opts.connectome = {
+    nodeScale: 0.5,      // Point size
+    edgeScale: 0.2,      // Line thickness
+    nodeColormap: 'warm',
+    edgeColormap: 'warm'
+  };
+  
+  nv.updateGLVolume();
+}
+```
+
+### View Switcher: Mesh vs Points
+
+```typescript
+type ViewMode = 'mesh' | 'points' | 'both';
+
+function setViewMode(nv: Niivue, mode: ViewMode): void {
+  const hasMeshes = nv.meshes.length > 0;
+  
+  switch (mode) {
+    case 'mesh':
+      // Show meshes, hide connectome
+      nv.meshes.forEach(m => m.visible = true);
+      nv.opts.connectome.nodeScale = 0;
+      break;
+      
+    case 'points':
+      // Hide meshes, show connectome
+      nv.meshes.forEach(m => m.visible = false);
+      nv.opts.connectome.nodeScale = 0.5;
+      break;
+      
+    case 'both':
+      // Show mesh at low opacity + points
+      nv.meshes.forEach(m => {
+        m.visible = true;
+        m.opacity = 0.3;
+      });
+      nv.opts.connectome.nodeScale = 0.3;
+      break;
+  }
+  
+  nv.updateGLVolume();
+}
+```
+
+### Loading sCPR Volume from Memory
+
+```typescript
+import { NVImage } from '@niivue/niivue';
+
+async function loadStraightenedVolume(
+  nv: Niivue,
+  scprBuffer: Float32Array,
+  dims: [number, number, number],
+  pixdims: [number, number, number]
+): Promise<void> {
+  // Create NVImage from raw buffer
+  const scprImage = new NVImage(
+    scprBuffer.buffer,
+    'straightened_vessel',
+    'gray',  // colormap
+    1.0,     // opacity
+    0,       // frame
+    'linear' // interpolation
+  );
+  
+  // Set dimensions
+  scprImage.dims = [1, dims[0], dims[1], dims[2], 1, 1, 1, 1];
+  scprImage.pixDims = [1, pixdims[0], pixdims[1], pixdims[2], 1, 1, 1, 1];
+  
+  await nv.addVolume(scprImage);
+  
+  // Switch to multiplanar view for scrolling through vessel
+  nv.setSliceType(nv.sliceTypeMultiplanar);
+}
+```
+
+### Netlify Deployment Configuration
+
+**`netlify.toml`:**
+```toml
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[[headers]]
+  for = "/*.gii"
+  [headers.values]
+    Content-Type = "application/octet-stream"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.nii.gz"
+  [headers.values]
+    Content-Type = "application/gzip"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.json"
+  [headers.values]
+    Content-Type = "application/json"
+    Cache-Control = "public, max-age=86400"
+```
+
+**Vite Configuration (`vite.config.ts`):**
+```typescript
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  assetsInclude: ['**/*.gii', '**/*.nii', '**/*.nii.gz'],
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    }
+  }
+});
+```
+
+---
+
+## 📄 Appendix A: Sample Data Format Reference
+
+### MEDIS Contour File Structure
+
+```
+# <GENERAL_INFO>
+# study_description : DISCHARGE
+# series_description : HALF 720ms 0.92s CTA/HALF DISCHARGE 720ms AIDR 3D STD CTA
+# patient_date_of_birth : 
+# patient_id : 01-BER-0088
+# patient_sex : F
+# file_id : 8028
+# patient_name : 01-BER-0088
+# base_name : 01-BER-0088_20181010_Session_..._ecrf.dcm<27243150:4348990>
+# vessel_name : rca
+
+# <CONTOUR_INFO>
+# Contour index: 0
+# group: Lumen                    ← Lumen or VesselWall
+# segment_name: Ostium
+# segment_type: SEGMENT_TYPE_EXCLUDED
+# segment_ahalabel: -1
+# SliceDistance: 0.25             ← Distance between contours (mm)
+# Number of points: 40            ← Points per contour ring
+6.152891159057617 -0.09696578979492188 1974.5980224609375
+6.102381706237793 -0.2288517951965332 1974.6019287109375
+...
+```
+
+### Key Fields
+
+| **Field** | **Description** | **Usage** |
+|-----------|-----------------|----------|
+| `vessel_name` | Coronary artery (lad, lcx, rca) | File naming, metadata |
+| `group` | Lumen or VesselWall | Separate mesh generation |
+| `SliceDistance` | Spacing between contours | Z-spacing for sCPR |
+| `Number of points` | Points per ring | `points_per_contour` parameter |
+| Coordinates | X Y Z in world space | Direct vertex positions |
+
+### Coordinate Interpretation
+
+- **X, Y:** Position in axial plane (mm from scanner origin)
+- **Z:** Table position / slice location (e.g., 1974.59 mm)
+- **Reference:** Same coordinate system as source DICOM/NIfTI
+
+---
+
+## 📚 Related Documentation
+
+- **MEDIS Viewer:** `medis-viewer.md` - Visualization platform for MEDIS contours
+- **SAM3D Platform:** `sam3d.md` - AI-driven segmentation (different approach)
+- **Funding Proposal:** `proposal.md` - DFG Koselleck grant
+
+---
+
+## 🔬 Mathematical References
+
+**Fast Marching Method:**
+- Sethian, J.A. (1996). "A fast marching level set method for monotonically advancing fronts." PNAS 93(4): 1591-1595.
+- Kimmel, R., Sethian, J.A. (1998). "Computing geodesic paths on manifolds." PNAS 95(15): 8431-8435.
+
+**Frangi Vesselness:**
+- Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." MICCAI 1998.
+
+**Polar Dynamic Programming:**
+- Sun, Y., et al. (2003). "Automated 3-D segmentation of lungs with lung cancer in CT data using a novel robust active shape model approach." IEEE TMI 2012.
+
+**Rotation Minimizing Frames:**
+- Wang, W., et al. (2008). "Computation of rotation minimizing frames." ACM TOG 27(1).
+
+**Curved Planar Reformation:**
+- Kanitsar, A., et al. (2002). "CPR - Curved planar reformation." IEEE Visualization 2002.
+
+---
+
+## ⚙️ Performance Targets
+
+**Python Prototype:**
+- Vesselness filter: 10-30s (depends on volume size)
+- FMM propagation: 2-5s
+- Single cross-section: <100ms
+- Full segmentation (200 slices): ~20-60s
+- GIfTI conversion: <1s per vessel
+- sCPR generation: 5-15s
+
+**Optimized (C++ / WASM):**
+- Vesselness filter: 1-3s (with GPU shader: <500ms)
+- FMM propagation: <1s
+- Full pipeline: <10s
+- sCPR with WebGL: <2s
+
+**Web (Niivue/Vite):**
+- Initial load (CTA + meshes): 2-5s
+- Mesh toggle: <50ms
+- View rotation: 60fps
+
+---
+
+**Document Version:** 2.0  
+**Last Updated:** 2025-12-19  
+**Project:** Classical Centerline Pipeline (FMM-based) + Web Visualization
