@@ -1165,7 +1165,77 @@ This pipeline converts MEDIS-format contour text files into GIfTI meshes for Nii
 
 **Dependencies:**
 ```bash
-pip install nibabel numpy SimpleITK
+pip install nibabel numpy SimpleITK scipy
+```
+
+### ⚠️ Critical: Handling Varying Point Counts Per Contour
+
+**Problem:** MEDIS export files contain cross-section rings with **varying numbers of points**. For example:
+- Contour 0 (Lumen): 50 points
+- Contour 1 (VesselWall): 49 points  
+- Contour 2 (Lumen): 55 points
+
+**Why This Matters:**
+1. **Naive meshing fails:** If Ring A has 50 points and Ring B has 49, connecting them 1:1 drops data
+2. **Twist artifacts:** Arbitrary start points per ring cause mesh "twisting"
+3. **Non-watertight meshes:** Gaps appear where point counts differ
+
+**Solution (Implemented in `code/buildstl.py` and conversion scripts):**
+
+1. **Resample all contours** to a uniform point count using **Cubic Spline interpolation**
+2. **Align start points** between consecutive rings (closest-neighbor matching)
+3. **Cap ends** to create water-tight solids for CFD
+
+```python
+from scipy.interpolate import CubicSpline
+
+def resample_polygon(polygon: np.ndarray, n_points: int) -> np.ndarray:
+    """
+    Resample a 3D polygon (closed loop) to exactly n_points.
+    Uses Cubic Spline interpolation for smooth results (CFD-grade).
+    """
+    closed = np.vstack((polygon, polygon[0]))  # Close the loop
+    
+    # Cumulative arc length
+    diffs = np.diff(closed, axis=0)
+    dists = np.sqrt((diffs ** 2).sum(axis=1))
+    cum_dists = np.concatenate(([0], np.cumsum(dists)))
+    perimeter = cum_dists[-1]
+    
+    # Cubic spline with periodic boundary
+    cs_x = CubicSpline(cum_dists, closed[:, 0], bc_type='periodic')
+    cs_y = CubicSpline(cum_dists, closed[:, 1], bc_type='periodic')
+    cs_z = CubicSpline(cum_dists, closed[:, 2], bc_type='periodic')
+    
+    new_dists = np.linspace(0, perimeter, n_points + 1)[:-1]
+    return np.column_stack((cs_x(new_dists), cs_y(new_dists), cs_z(new_dists)))
+
+
+def align_contours(contours: list) -> list:
+    """
+    Rotational alignment to prevent twisting.
+    Each ring's start point aligns to closest neighbor in previous ring.
+    """
+    if not contours:
+        return []
+    aligned = [contours[0]]
+    for i in range(len(contours) - 1):
+        prev = aligned[i]
+        curr = contours[i + 1]
+        distances = np.linalg.norm(curr - prev[0], axis=1)
+        start_idx = np.argmin(distances)
+        aligned.append(np.roll(curr, -start_idx, axis=0))
+    return aligned
+```
+
+**File Naming Convention:**
+```
+{patient_id}_{vessel}_{inner|outer}.{gii|json}
+
+Examples:
+- 01-BER-0088_LAD_inner.gii   (Lumen mesh)
+- 01-BER-0088_LAD_outer.gii   (VesselWall mesh)
+- 01-BER-0088_RCA_inner.json  (Lumen point cloud)
 ```
 
 ### Complete Conversion Script
