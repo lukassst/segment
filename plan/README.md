@@ -278,8 +278,6 @@ Contains old versions and duplicates. See `legacy/README.md` for migration detai
 ## 📧 Contact
 
 **Project:** Segment Platform  
-**Institution:** Charité – Universitätsmedizin Berlin  
-**Target PI:** Prof. Marc Dewey  
 **Documentation Version:** 2.0 (Consolidated)  
 **Last Updated:** 2025-12-18
 

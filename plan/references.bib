@@ -21,7 +21,7 @@
 
 @article{DISCHARGE2022NEJM,
   author    = {{DISCHARGE Trial Group}},
-  title     = {Computed Tomography and Exercise Electrocardiography in Patients with Suspected Stable Angina Pectoris},
+  title     = {Computed Tomography or Invasive Coronary Angiography in Patients with Stable Chest Pain},
   journal   = {New England Journal of Medicine},
   volume    = {386},
   number    = {19},
@@ -82,6 +82,7 @@
   year      = {2024},
   pages     = {1--18},
   publisher = {Springer},
+  doi       = {10.1007/978-3-031-72469-6_1},
   note      = {ECCV 2024 BIC Oral. SAM-Med3D-turbo: 3D ViT-B/16 encoder (86M params), trained on SA-Med3D-140K (143K masks, 245 categories), 10-100× fewer prompts than standard methods. Available: Hugging Face (blueyo0/SAM-Med3D)},
   url       = {https://github.com/uni-medical/SAM-Med3D}
 }
@@ -129,6 +130,7 @@
   year      = {2024},
   publisher = {GitHub},
   url       = {https://github.com/niivue/niivue},
+  doi       = {10.5281/zenodo.8320937},
   note      = {High-performance WebGL2 engine for 3D medical imaging visualization. Supports NIfTI, DICOM, mesh rendering, MPR, and 4D volumes. TypeScript support with full type definitions}
 }
 
@@ -271,6 +273,87 @@
   doi       = {10.1038/s41586-023-05881-4},
   pmid      = {37046090},
   note      = {Perspective on foundation models in medicine: pre-training on large-scale data, fine-tuning for specific tasks, potential for generalist AI}
+}
+
+% ============================================================================
+% VESSEL SEGMENTATION: CLASSICAL METHODS
+% ============================================================================
+
+@article{Sethian1996FastMarching,
+  author    = {Sethian, J. A.},
+  title     = {A fast marching level set method for monotonically advancing fronts},
+  journal   = {Proceedings of the National Academy of Sciences},
+  volume    = {93},
+  number    = {4},
+  pages     = {1591--1595},
+  year      = {1996},
+  doi       = {10.1073/pnas.93.4.1591},
+  pmid      = {11607632},
+  note      = {Foundational paper on Fast Marching Method for path extraction in medical imaging}
+}
+
+@article{Kimmel1998GeodesicPaths,
+  author    = {Kimmel, R. and Sethian, J. A.},
+  title     = {Computing geodesic paths on manifolds},
+  journal   = {Proceedings of the National Academy of Sciences},
+  volume    = {95},
+  number    = {15},
+  pages     = {8431--8435},
+  year      = {1998},
+  doi       = {10.1073/pnas.95.15.8431},
+  pmid      = {9671692},
+  note      = {Extension of FMM for computing shortest paths on curved manifolds (vessels)}
+}
+
+@inproceedings{Frangi1998Vesselness,
+  author    = {Frangi, Alejandro F. and Niessen, Wiro J. and Vincken, Koen L. and Viergever, Max A.},
+  title     = {Multiscale vessel enhancement filtering},
+  booktitle = {Medical Image Computing and Computer-Assisted Intervention (MICCAI)},
+  year      = {1998},
+  pages     = {130--137},
+  publisher = {Springer},
+  doi       = {10.1007/BFb0056195},
+  note      = {Landmark vesselness filter using Hessian eigenvalues for tubular structure enhancement}
+}
+
+@article{Sun2013ASM,
+  author    = {Sun, Y. and Bae, K. T. and Staib, L. H.},
+  title     = {Automated 3-D segmentation of lungs with lung cancer in CT data using a novel robust active shape model approach},
+  journal   = {IEEE Transactions on Medical Imaging},
+  volume    = {32},
+  number    = {3},
+  pages     = {569--582},
+  year      = {2013},
+  doi       = {10.1109/TMI.2012.2230445},
+  pmid      = {23222142},
+  note      = {Polar transform + dynamic programming for vessel boundary segmentation}
+}
+
+% ============================================================================
+% ROTATION MINIMIZING FRAMES AND CPR
+% ============================================================================
+
+@article{Wang2008RotationMinimizing,
+  author    = {Wang, W. and Jüttler, B. and Zheng, Y. and Liu, Y.},
+  title     = {Computation of rotation minimizing frames},
+  journal   = {ACM Transactions on Graphics},
+  volume    = {27},
+  number    = {1},
+  pages     = {1--18},
+  year      = {2008},
+  doi       = {10.1145/1330511.1330512},
+  note      = {Rotation Minimizing Frames (Bishop frames) for smooth vessel coordinate systems}
+}
+
+@inproceedings{Kanitsar2002CPR,
+  author    = {Kanitsar, A. and Ropinski, T. and Fleischmann, D. and König, A. and Gröller, M. E.},
+  title     = {CPR - Curved planar reformation},
+  booktitle = {IEEE Visualization},
+  year      = {2002},
+  pages     = {413--420},
+  publisher = {IEEE},
+  doi       = {10.1109/VIS.2002.5930066},
+  note      = {Pioneering work on Curved Planar Reformation for vessel visualization}
 }
 
 % ============================================================================
