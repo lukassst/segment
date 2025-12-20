@@ -882,12 +882,350 @@ export function exportSTL(
 
 ---
 
+## � Centerline Construction from MEDIS Files
+
+### Understanding SliceDistance
+
+The `SliceDistance` parameter in MEDIS TXT files represents the **cumulative arc length** along the vessel centerline from the origin (ostium), measured in millimeters:
+
+```
+# Contour index: 0
+# SliceDistance: 0.25    ← 0.25 mm from ostium
+
+# Contour index: 2  
+# SliceDistance: 0.75    ← 0.75 mm from ostium (NOT 0.5 mm after previous!)
+```
+
+**Key Insight:** SliceDistance values are **NOT uniform intervals**. The spacing between consecutive contours varies (e.g., 0.25, 0.75, 1.25... means 0.5mm gaps, but could also be 0.25, 0.50, 0.75...).
+
+### Centerline Point = Centroid (Center of Mass)
+
+For each contour ring, the centerline point is the **geometric centroid** of the lumen contour:
+
+```python
+def compute_centerline_point(lumen_contour: np.ndarray) -> np.ndarray:
+    """
+    Centerline point = center of mass of lumen contour.
+    
+    Args:
+        lumen_contour: Nx3 array of (x, y, z) points on lumen boundary
+    
+    Returns:
+        centerline_point: [cx, cy, cz] centroid coordinates
+    """
+    return np.mean(lumen_contour, axis=0)
+```
+
+**Why Centroid?**
+- Represents geometric center of blood pool cross-section
+- Natural reference for perpendicular plane orientation
+- Used by MEDIS internally for SliceDistance computation
+- Robust to asymmetric vessel shapes (eccentric plaque)
+
+### Complete Centerline Extraction
+
+```python
+def extract_centerline_from_medis(contours: dict) -> dict:
+    """
+    Extract centerline from parsed MEDIS contours.
+    
+    Args:
+        contours: {'Lumen': [np.array, ...], 'VesselWall': [np.array, ...]}
+    
+    Returns:
+        {
+            'points': Nx3 array of centerline points,
+            'slice_distances': N array of arc lengths (mm),
+            'tangents': Nx3 array of unit tangent vectors
+        }
+    """
+    lumen_contours = contours['Lumen']
+    
+    # Compute centroids
+    centerline_points = np.array([
+        np.mean(contour, axis=0) for contour in lumen_contours
+    ])
+    
+    # SliceDistance values (parse from file or compute from point spacing)
+    # Note: These are cumulative arc lengths, not inter-slice gaps
+    
+    # Compute tangent vectors via finite differences
+    tangents = compute_tangents(centerline_points)
+    
+    return {
+        'points': centerline_points,
+        'tangents': tangents
+    }
+```
+
+---
+
+## 📐 CPR Slice Thickness Considerations
+
+### The Slice Thickness Question
+
+When constructing a **Curved Planar Reformation (CPR)** or straightened MPR volume, we must decide how much of the original CTA volume each "slice" should represent.
+
+**Options:**
+
+1. **Zero thickness (single plane):** Sample exactly at the centerline point
+2. **Symmetric slab:** Sample ±half_thickness around centerline
+3. **Forward/backward slab:** Sample in direction of vessel progression
+
+### Recommended Approach: Symmetric Slab with SliceDistance-Based Thickness
+
+```
+Slice i covers: [centerline[i] - T/2 * tangent, centerline[i] + T/2 * tangent]
+
+where:
+  T = slice thickness (typically = inter-slice spacing)
+  tangent = unit vector along vessel direction
+```
+
+**Thickness Calculation:**
+
+```python
+def compute_slice_thickness(slice_distances: list, index: int) -> float:
+    """
+    Compute slice thickness based on neighboring SliceDistance values.
+    
+    Uses half the distance to previous + half to next neighbor.
+    This ensures no gaps or overlaps between adjacent slices.
+    """
+    n = len(slice_distances)
+    
+    if index == 0:
+        # First slice: use distance to next
+        return slice_distances[1] - slice_distances[0]
+    elif index == n - 1:
+        # Last slice: use distance from previous
+        return slice_distances[n-1] - slice_distances[n-2]
+    else:
+        # Interior: half-half from neighbors
+        d_prev = slice_distances[index] - slice_distances[index - 1]
+        d_next = slice_distances[index + 1] - slice_distances[index]
+        return (d_prev + d_next) / 2
+```
+
+### CPR Volume Construction
+
+```python
+def construct_cpr_volume(
+    cta_volume: np.ndarray,
+    centerline_points: np.ndarray,
+    tangents: np.ndarray,
+    normals: np.ndarray,
+    binormals: np.ndarray,
+    slice_distances: list,
+    cross_section_size: int = 64,
+    pixel_spacing: float = 0.5  # mm
+) -> np.ndarray:
+    """
+    Construct straightened CPR volume.
+    
+    Output dimensions: [cross_section_size, cross_section_size, N_slices]
+    
+    Each slice is sampled perpendicular to the vessel tangent.
+    Slice thickness is automatically determined from SliceDistance spacing.
+    """
+    N = len(centerline_points)
+    cpr_volume = np.zeros((cross_section_size, cross_section_size, N))
+    
+    for i in range(N):
+        # Get slice thickness (for potential MIP or averaging)
+        thickness = compute_slice_thickness(slice_distances, i)
+        
+        # Sample cross-section at this centerline point
+        # For thin slices, single-plane sampling is sufficient
+        # For thick slices, consider averaging multiple sub-samples
+        cross_section = sample_perpendicular_plane(
+            cta_volume,
+            center=centerline_points[i],
+            normal=normals[i],
+            binormal=binormals[i],
+            size=cross_section_size,
+            spacing=pixel_spacing
+        )
+        
+        cpr_volume[:, :, i] = cross_section
+    
+    return cpr_volume
+```
+
+### Practical Notes for CPR
+
+- **Typical MEDIS spacing:** 0.25-0.5 mm between contours
+- **CTA voxel size:** ~0.3-0.5 mm isotropic
+- **Recommendation:** Use single-plane sampling when inter-slice spacing ≤ CTA voxel size
+- **For thicker slabs:** Use Maximum Intensity Projection (MIP) or averaging
+
+---
+
+## 🔄 MEDIS File Conversion Pipeline
+
+### Available Converters (in `code/` directory)
+
+| Script | Input | Output | Purpose |
+|--------|-------|--------|----------|
+| `medis_to_gii.py` | MEDIS TXT | GIfTI mesh (.gii) | Water-tight meshes for Niivue overlay |
+| `medis_to_json.py` | MEDIS TXT | JSON point cloud | Niivue connectome visualization |
+| `medis_to_cpr.py` | MEDIS TXT + NIfTI | CPR volumes (.nii.gz) | Straightened vessel views |
+| `medis_stl.py` | MEDIS TXT | STL mesh | 3D printing, external tools |
+| `run_conversion.py` | - | All formats | Batch convert example files |
+
+### Conversion Quality Standards
+
+**GIfTI Generation (`medis_to_gii.py`):**
+- ✅ Cubic spline resampling to uniform 64 points/ring
+- ✅ Rotational alignment prevents mesh twisting
+- ✅ Water-tight end caps for CFD compatibility
+- ✅ Embedded metadata (PatientID, VesselName, etc.)
+- ✅ Correct GIfTI intent codes (POINTSET + TRIANGLE)
+
+**JSON Generation (`medis_to_json.py`):**
+- ✅ Niivue connectome format with nodes + edges
+- ✅ Intra-ring edges (closed contours)
+- ✅ Inter-ring edges (every 4th point for wireframe)
+- ✅ Uniform resampling for consistent visualization
+
+**STL Generation (`medis_stl.py`):**
+- ✅ Binary STL format
+- ✅ Proper face winding (CCW for correct normals)
+- ✅ Capped ends option for solid meshes
+- ⚠️ No coordinate system metadata (use GIfTI for medical alignment)
+
+**CPR Generation (`medis_to_cpr.py`):**
+- ✅ Cross-sectional CPR: Straightened 3D volume (scroll through vessel)
+- ✅ Longitudinal CPR: 2D planes along vessel axis (SU and SV cuts)
+- ✅ Centerline extracted as lumen contour centroids
+- ✅ Rotation Minimizing Frame (RMF) prevents twist artifacts
+- ✅ Natural spacing: resampled to match CTA voxel resolution
+- ✅ Frame JSON exported for mesh/point coordinate transformation
+
+### Running Conversions
+
+```bash
+cd code/
+python run_conversion.py  # Converts all example files in data/
+
+# Or individual conversion:
+python medis_to_gii.py ../data/medis_file.txt ../data/cta.nii.gz ../data/
+python medis_to_cpr.py ../data/medis_file.txt ../data/cta.nii.gz ../data/
+```
+
+### CPR Output Files
+
+For each vessel, `medis_to_cpr.py` generates three files:
+
+| File | Axes | Description |
+|------|------|-------------|
+| `{patient}_{vessel}_cpr_cross.nii.gz` | U × V × S (120×120×N) | Cross-sectional volume: scroll S to move along vessel |
+| `{patient}_{vessel}_cpr_long.nii.gz` | S × U × V (N×120×120) | Longitudinal volume: scroll V to rotate around vessel |
+| `{patient}_{vessel}_cpr_frame.json` | - | Centerline + RMF for coordinate transform |
+
+**Cross-sectional CPR (U×V×S = 120×120×N):**
+- **U-axis (dim 0):** Normal direction (horizontal in cross-section)
+- **V-axis (dim 1):** Binormal direction (vertical in cross-section)  
+- **S-axis (dim 2):** Along vessel centerline (scroll to move through vessel)
+- Each S-slice shows a perpendicular "donut" view centered on lumen
+
+**Longitudinal CPR (S×U×V = N×120×120):**
+- **S-axis (dim 0):** Along vessel centerline
+- **U-axis (dim 1):** Normal direction (lateral offset)
+- **V-axis (dim 2):** Binormal direction (depth offset)
+- **Scrolling V:** Pans the longitudinal cut from front to back (center slice = mid-vessel)
+- **Rotating:** Since this is a full 3D volume, use the **viewer's rotation tools** to spin the view 360° around the centerline
+
+**Frame JSON:** Contains centerline points and RMF vectors for coordinate transformation.
+
+### Transformed Mesh/Point Cloud Files
+
+Use `transform_to_cpr.py` to convert mesh and point cloud files to CPR coordinates:
+
+```bash
+# Batch transform all files for a vessel:
+python transform_to_cpr.py --batch ../data/01-BER-0088_LAD_cpr_frame.json ../data/
+```
+
+| Original File | Transformed File | Description |
+|---------------|------------------|-------------|
+| `{patient}_{vessel}_inner.gii` | `{patient}_{vessel}_inner_cpr.gii` | Lumen mesh in CPR coords |
+| `{patient}_{vessel}_outer.gii` | `{patient}_{vessel}_outer_cpr.gii` | Vessel wall mesh in CPR coords |
+| `{patient}_{vessel}_inner.json` | `{patient}_{vessel}_inner_cpr.json` | Lumen points in CPR coords |
+| `{patient}_{vessel}_outer.json` | `{patient}_{vessel}_outer_cpr.json` | Vessel wall points in CPR coords |
+
+**Viewing in Niivue:**
+
+1. **Load Volumes:**
+   - Cross-sectional: `{vessel}_cpr_cross.nii.gz`
+   - Longitudinal: `{vessel}_cpr_long.nii.gz`
+
+2. **Load Overlays (Optional):**
+   - Mesh: `{vessel}_inner_cpr.gii`
+   - Points: `{vessel}_inner_cpr.json`
+
+3. **Interact:**
+   - **Cross-sectional:** Scroll S-axis to fly through vessel.
+   - **Longitudinal:** Scroll V-axis to pan depth. **Rotate** to see different angles.
+
+### 🎮 Implementing Rotation in NiiVue
+
+Since NiiVue uses WebGL, rotation is hardware-accelerated and smooth. You can programmatically set the viewing angle for the Longitudinal CPR:
+
+```javascript
+// 1. Load volume
+await nv.loadVolumes([{url: "./data/01-BER-0088_LAD_cpr_long.nii.gz"}]);
+
+// 2. Set to 3D Rendering mode
+nv.setSliceType(nv.sliceTypeRender);
+
+// 3. Set "Hero" angle (e.g., standard longitudinal view)
+nv.scene.azimuth = 120;   // Horizontal rotation (0-360)
+nv.scene.elevation = 15;  // Vertical tilt (-90 to 90)
+
+// 4. Update scene
+nv.drawScene();
+```
+
+**Pro-Tip for finding angles:**
+1. Rotate manually in the browser until perfect.
+2. Open console (F12) and check `nv.scene.azimuth` and `nv.scene.elevation`.
+3. Copy values to your code.
+
+### Coordinate System Details
+
+CPR coordinates are in **voxel units** centered on the cross-section:
+
+| Axis | Range | Meaning |
+|------|-------|----------|
+| X (U) | 0-119 | Normal direction, center = 60 |
+| Y (V) | 0-119 | Binormal direction, center = 60 |
+| Z (S) | 0 to N-1 | Slice index along centerline |
+
+**World → CPR Transform (`transform_to_cpr.py`):**
+
+```python
+def world_to_cpr(world_point, frame_data):
+    # 1. Find nearest centerline point (gives S index)
+    # 2. Project displacement onto local frame:
+    #    u = dot(world_point - centerline[s], normal[s])
+    #    v = dot(world_point - centerline[s], binormal[s])
+    # 3. Convert to voxel coords:
+    #    X = u / spacing + center
+    #    Y = v / spacing + center
+    #    Z = s
+```
+
+The `transform_to_cpr.py` script handles this automatically for GIfTI and JSON files.
+
+---
+
 ## 📚 Related Documentation
 
 - **SAM3D Platform:** `sam3d.md` - AI-driven segmentation (different project)
-- **Classical Centerline:** `centerline-pipeline.md` - FMM-based extraction (different approach)
+- **Vessel Segmenter:** `vessel-segmenter.md` - Classical FMM-based segmentation pipeline
 - **Funding Proposal:** `proposal.md` - DFG Koselleck grant
-- **Code Implementation:** `code/buildstl.py` - Python reference for mesh generation
+- **Code Implementation:** `code/medis_stl.py` - Python reference for STL mesh generation
 
 ---
 
@@ -900,10 +1238,10 @@ export function exportSTL(
 4. ✅ Mesh overlay (lumen + vessel wall)
 
 ### Phase 2: Advanced Views (Important)
-1. ⏳ Centerline extraction (Frenet-Serret)
-2. ⏳ Cross-section extraction (perpendicular slices)
-3. ⏳ Straightened MPR construction
-4. ⏳ Quad-view layout
+1. ✅ Centerline extraction (lumen centroids + RMF)
+2. ✅ Cross-section extraction (perpendicular slices)
+3. ✅ Straightened CPR construction (`medis_to_cpr.py`)
+4. ⏳ Quad-view layout (viewer integration)
 
 ### Phase 3: Interactivity (Enhancement)
 1. ⏳ Slider controls (position, rotation, zoom)
@@ -913,6 +1251,6 @@ export function exportSTL(
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** 2025-12-18  
+**Document Version:** 2.1  
+**Last Updated:** 2025-12-20  
 **Project:** MEDIS Viewer Platform

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Run MEDIS to JSON and GIfTI conversions for all example files."""
+"""Run MEDIS to JSON and GIfTI conversions for all example files.
+
+Usage:
+    python run_conversion.py
+    
+This script is located in the code/ directory and references data/ as a sibling.
+"""
 
 import os
-import sys
-
-# Add code directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'code'))
 
 from medis_to_json import convert_medis_to_json
 from medis_to_gii import convert_medis_to_gii
 
-# Base paths
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+# Base paths (code/ is current dir, data/ is sibling)
+CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CODE_DIR)
+DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 CTA_FILE = os.path.join(DATA_DIR, '01-BER-0088.nii.gz')
 
 # MEDIS export files
