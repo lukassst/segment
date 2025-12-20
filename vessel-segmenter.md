@@ -1809,6 +1809,292 @@ def create_straightened_cpr(
 
 For standard sCPR, set output NIfTI `pixdim[3] = SliceDistance`.
 
+### Orthogonal Slicing: Longitudinal Reconstruction
+
+Once the sCPR volume is generated, you are **not limited to cross-sectional views**. The straightened volume is a standard 3D rectilinear grid that supports orthogonal slicing along any axis.
+
+#### Understanding the sCPR Volume Axes
+
+| **Axis** | **Name** | **Physical Meaning** | **Typical Size** |
+|----------|----------|---------------------|------------------|
+| **S** | Longitudinal | Distance along vessel centerline | N slices × SliceDistance |
+| **U** | Horizontal | Cross-sectional width | slice_size × pixel_resolution |
+| **V** | Vertical | Cross-sectional height | slice_size × pixel_resolution |
+
+#### Three Clinical Views from sCPR
+
+| **View** | **Plane** | **What You See** | **Clinical Use** |
+|----------|-----------|------------------|------------------|
+| **Cross-Sectional** | $uv$ | "Donut" view of vessel | Lumen area, eccentric plaque detection |
+| **Longitudinal** | $su$ or $sv$ | Vessel "cut in half" lengthwise | Lesion length, diameter step-downs |
+| **MIP Projection** | $s$-projection | All calcifications in one image | Calcium scoring along vessel |
+
+#### The Longitudinal View: Clinical Gold Standard
+
+The **longitudinal view** ($su$ or $sv$ plane) is often the most clinically valuable:
+
+```
+Cross-Sectional (uv):        Longitudinal (su):
+                             
+    ┌─────────┐              S ↑  ════════════════
+    │  ○○○○○  │                │  ║  Lumen      ║
+    │ ○     ○ │                │  ║    ████     ║ ← Stenosis
+    │ ○  ●  ○ │  ← Lumen       │  ║  Lumen      ║
+    │ ○     ○ │                │  ════════════════
+    │  ○○○○○  │                └──────────────────→ U
+    └─────────┘                    
+    
+    Single slice view          Entire vessel length
+```
+
+**Advantages:**
+- Vessel appears as a **straight pipe** (even if original was tortuous)
+- **Centerline centering** ($u=0, v=0$) keeps vessel in frame center
+- Easy to measure **stenosis length** in mm
+- Visualize **plaque tapering** over distance
+
+**Example:** With `SliceDistance = 0.25 mm` and 50 centerline points:
+- Longitudinal view spans: $50 \times 0.25 = 12.5$ mm of vessel
+- Resolution along S-axis: 0.25 mm/pixel
+
+#### Niivue Integration for Multiplanar Views
+
+```typescript
+// Load sCPR volume and display all three orthogonal views
+async function displaySCPRMultiplanar(nv: Niivue, scprVolume: NVImage): Promise<void> {
+  await nv.addVolume(scprVolume);
+  
+  // Enable multiplanar view (shows XY, XZ, YZ simultaneously)
+  // In sCPR context: XY = uv (cross-section), XZ = su, YZ = sv (longitudinal)
+  nv.setSliceType(nv.sliceTypeMultiplanar);
+  
+  // Optional: Set crosshair to vessel center
+  nv.scene.crosshairPos = [0.5, 0.5, 0.5];  // Center of volume
+}
+```
+
+### Coordinate Transformations: Forward and Inverse
+
+The sCPR system requires **bidirectional mapping** between coordinate systems:
+- **Forward:** $(s, u, v) \to (x, y, z)$ — Used for volume resampling
+- **Inverse:** $(x, y, z) \to (s, u, v)$ — Used for mapping findings back to sCPR
+
+#### Forward Transformation: $(s, u, v) \to (x, y, z)$
+
+This is the **Resampling Mapping** used to construct the straightened volume.
+
+**Mathematical Form:**
+$$\vec{W}(x, y, z) = P(s) + u \cdot \vec{N}(s) + v \cdot \vec{B}(s)$$
+
+**Matrix Form** (for a specific slice at $s$):
+$$\begin{bmatrix} x \\ y \\ z \end{bmatrix} = \begin{bmatrix} N_x & B_x \\ N_y & B_y \\ N_z & B_z \end{bmatrix} \begin{bmatrix} u \\ v \end{bmatrix} + \begin{bmatrix} P_x(s) \\ P_y(s) \\ P_z(s) \end{bmatrix}$$
+
+**Note:** The tangent $\vec{T}(s)$ is not used in position calculation because $u, v$ exist strictly within the plane perpendicular to $\vec{T}$.
+
+```python
+def forward_transform(
+    s_index: int,
+    u: float,
+    v: float,
+    centerline: np.ndarray,
+    normals: np.ndarray,
+    binormals: np.ndarray
+) -> np.ndarray:
+    """
+    Transform from sCPR coordinates to world coordinates.
+    
+    Args:
+        s_index: Index along centerline (discrete s coordinate)
+        u: Lateral offset in normal direction (mm)
+        v: Lateral offset in binormal direction (mm)
+        centerline: Nx3 centerline points
+        normals: Nx3 normal vectors
+        binormals: Nx3 binormal vectors
+    
+    Returns:
+        world_coord: [x, y, z] in world space
+    """
+    P = centerline[s_index]
+    N = normals[s_index]
+    B = binormals[s_index]
+    
+    return P + u * N + v * B
+```
+
+#### Inverse Transformation: $(x, y, z) \to (s, u, v)$
+
+This is the **Projection Mapping** used to locate CTA findings in the straightened view.
+
+**Step A: Find $s$ (Longitudinal Coordinate)**
+
+The $s$ coordinate minimizes the distance to the centerline:
+$$s = \text{argmin}_s \|\vec{W} - P(s)\|$$
+
+For discrete centerlines, find the nearest point index. For sub-voxel precision, project onto the line segment between adjacent points.
+
+**Step B: Find $u$ and $v$ (Cross-Sectional Coordinates)**
+
+Compute the displacement vector and project onto local axes:
+$$\vec{D} = \vec{W} - P(s)$$
+$$u = \vec{D} \cdot \vec{N}(s)$$
+$$v = \vec{D} \cdot \vec{B}(s)$$
+
+```python
+def inverse_transform(
+    world_point: np.ndarray,
+    centerline: np.ndarray,
+    normals: np.ndarray,
+    binormals: np.ndarray,
+    slice_distance: float = 0.25
+) -> tuple:
+    """
+    Transform from world coordinates to sCPR coordinates.
+    
+    Args:
+        world_point: [x, y, z] in world space
+        centerline: Nx3 centerline points
+        normals: Nx3 normal vectors
+        binormals: Nx3 binormal vectors
+        slice_distance: Physical distance between slices (mm)
+    
+    Returns:
+        s: Longitudinal coordinate (mm along vessel)
+        u: Cross-sectional coordinate (mm)
+        v: Cross-sectional coordinate (mm)
+        s_index: Nearest centerline index
+    """
+    # Step A: Find nearest centerline point
+    distances = np.linalg.norm(centerline - world_point, axis=1)
+    s_index = np.argmin(distances)
+    
+    # Optional: Refine with projection onto line segment
+    s_index_refined, t = refine_projection(
+        world_point, centerline, s_index
+    )
+    
+    # Step B: Project displacement onto local frame
+    P = centerline[s_index]
+    N = normals[s_index]
+    B = binormals[s_index]
+    
+    D = world_point - P
+    u = np.dot(D, N)
+    v = np.dot(D, B)
+    
+    # Convert index to physical distance
+    s = s_index * slice_distance
+    
+    return s, u, v, s_index
+
+
+def refine_projection(
+    point: np.ndarray,
+    centerline: np.ndarray,
+    nearest_idx: int
+) -> tuple:
+    """
+    Refine s coordinate by projecting onto line segment.
+    
+    Returns:
+        refined_idx: Float index (e.g., 5.3 means between points 5 and 6)
+        t: Interpolation parameter [0, 1]
+    """
+    n = len(centerline)
+    
+    # Check both adjacent segments
+    best_dist = float('inf')
+    best_idx = nearest_idx
+    best_t = 0.0
+    
+    for idx in [nearest_idx - 1, nearest_idx]:
+        if idx < 0 or idx >= n - 1:
+            continue
+        
+        A = centerline[idx]
+        B = centerline[idx + 1]
+        AB = B - A
+        AP = point - A
+        
+        # Project onto segment
+        t = np.clip(np.dot(AP, AB) / (np.dot(AB, AB) + 1e-10), 0, 1)
+        proj = A + t * AB
+        dist = np.linalg.norm(point - proj)
+        
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = idx
+            best_t = t
+    
+    return best_idx + best_t, best_t
+```
+
+#### Transformation Summary Table
+
+| **Direction** | **Operation** | **Mathematical Tool** | **Use Case** |
+|---------------|---------------|----------------------|--------------|
+| $(s, u, v) \to (x, y, z)$ | Vector Addition | Linear combination of basis vectors | Volume resampling |
+| $(x, y, z) \to s$ | Optimization | Nearest neighbor / distance minimization | Find slice index |
+| $(x, y, z) \to (u, v)$ | Projection | Dot product with $\vec{N}, \vec{B}$ | Find position in slice |
+
+#### Research Application: Plaque Burden Mapping
+
+The inverse transformation enables **quantitative plaque analysis**:
+
+```python
+def map_plaque_to_scpr(
+    plaque_mask: np.ndarray,
+    volume_spacing: tuple,
+    centerline: np.ndarray,
+    normals: np.ndarray,
+    binormals: np.ndarray,
+    slice_distance: float = 0.25
+) -> np.ndarray:
+    """
+    Map plaque segmentation mask to sCPR coordinates.
+    
+    Returns plaque burden per mm of vessel length.
+    """
+    # Find all plaque voxels
+    plaque_coords = np.argwhere(plaque_mask > 0)
+    
+    # Convert to world coordinates
+    world_coords = plaque_coords * np.array(volume_spacing)
+    
+    # Map each voxel to sCPR space
+    n_slices = len(centerline)
+    plaque_per_slice = np.zeros(n_slices)
+    
+    for world_point in world_coords:
+        s, u, v, s_idx = inverse_transform(
+            world_point, centerline, normals, binormals, slice_distance
+        )
+        
+        # Accumulate plaque area at this slice
+        voxel_area = volume_spacing[0] * volume_spacing[1]  # mm²
+        plaque_per_slice[s_idx] += voxel_area
+    
+    # Convert to plaque burden per mm of vessel
+    plaque_burden_per_mm = plaque_per_slice / slice_distance
+    
+    return plaque_burden_per_mm
+```
+
+**Output:** A 1D array showing plaque burden (mm²/mm) along the vessel length, enabling:
+- Identification of **maximum plaque burden location**
+- Measurement of **total plaque volume**
+- Correlation with **FFR measurements**
+
+### Frame Consistency: Why RMF Matters for Transformations
+
+**Critical:** The inverse transformation only works correctly if the $\{\vec{N}, \vec{B}\}$ basis is **consistent** along the vessel.
+
+| **Frame Type** | **Behavior** | **Effect on Inverse Transform** |
+|----------------|--------------|--------------------------------|
+| **RMF (Bishop)** | Smooth propagation | ✅ Stable $u, v$ coordinates |
+| **Frenet-Serret** | Flips at inflection points | ❌ $u, v$ "spin" around vessel |
+
+With Frenet-Serret, a straight plaque would appear to **spiral** around the vessel in the sCPR view. The RMF ensures anatomical features maintain consistent orientation.
+
 ---
 
 ## 🌐 Phase 9: TypeScript / Niivue / Vite Integration
@@ -2112,6 +2398,6 @@ export default defineConfig({
 
 ---
 
-**Document Version:** 2.0  
-**Last Updated:** 2025-12-19  
+**Document Version:** 2.1  
+**Last Updated:** 2025-12-20  
 **Project:** Classical Centerline Pipeline (FMM-based) + Web Visualization
