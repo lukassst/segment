@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MEDIS Vessel Viewer - Simple</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: #16213e;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+      border-bottom: 2px solid #e94560;
+    }
+    header h1 {
+      font-size: 16px;
+      color: #e94560;
+      margin-right: 20px;
+    }
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .control-group label {
+      font-size: 12px;
+      color: #aaa;
+    }
+    select, button {
+      background: #0f3460;
+      color: #eee;
+      border: 1px solid #e94560;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    select:hover, button:hover {
+      background: #1a3a6e;
+    }
+    button.active {
+      background: #e94560;
+    }
+    input[type="range"] {
+      width: 80px;
+      accent-color: #e94560;
+    }
+    input[type="checkbox"] {
+      accent-color: #e94560;
+    }
+    main {
+      flex: 1;
+      position: relative;
+      background: #000;
+    }
+    canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    .info-bar {
+      background: #16213e;
+      padding: 8px 20px;
+      font-size: 11px;
+      color: #888;
+      display: flex;
+      justify-content: space-between;
+    }
+    .info-bar .coords {
+      font-family: monospace;
+      color: #e94560;
+    }
+    .separator {
+      width: 1px;
+      height: 24px;
+      background: #0f3460;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🫀 MEDIS Vessel Viewer</h1>
+    
+    <div class="control-group">
+      <button id="btnWorld" class="active">World Space</button>
+      <button id="btnCPR">CPR Space</button>
+    </div>
+    
+    <div class="separator"></div>
+    
+    <div class="control-group">
+      <label>Vessel:</label>
+      <select id="vesselSelect">
+        <option value="LAD">LAD</option>
+        <option value="RCA">RCA</option>
+        <option value="LCX">LCX</option>
+        <option value="D1">D1</option>
+      </select>
+    </div>
+    
+    <div class="separator"></div>
+    
+    <div class="control-group">
+      <input type="checkbox" id="chkInner" checked />
+      <label for="chkInner">Lumen</label>
+    </div>
+    <div class="control-group">
+      <input type="checkbox" id="chkOuter" checked />
+      <label for="chkOuter">Wall</label>
+    </div>
+    
+    <div class="separator"></div>
+    
+    <div class="control-group">
+      <label>Mesh α:</label>
+      <input type="range" id="meshAlpha" min="0" max="100" value="80" />
+    </div>
+    
+    <div class="control-group">
+      <label>X-Ray:</label>
+      <input type="range" id="meshXRay" min="0" max="100" value="30" />
+    </div>
+    
+    <div class="separator"></div>
+    
+    <div class="control-group">
+      <label>View:</label>
+      <select id="viewSelect">
+        <option value="3d">3D Render</option>
+        <option value="multi">Multiplanar</option>
+        <option value="axial">Axial</option>
+        <option value="coronal">Coronal</option>
+        <option value="sagittal">Sagittal</option>
+      </select>
+    </div>
+    
+    <div class="control-group">
+      <input type="checkbox" id="chkCrosshair" checked />
+      <label for="chkCrosshair">Crosshair</label>
+    </div>
+  </header>
+  
+  <main>
+    <canvas id="gl1"></canvas>
+  </main>
+  
+  <div class="info-bar">
+    <span id="statusText">Initializing...</span>
+    <span>
+      <span id="volumeInfo"></span>
+      &nbsp;|&nbsp;
+      <span class="coords" id="coordsText"></span>
+    </span>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@niivue/niivue@latest/dist/niivue.umd.js"></script>
+  <script>
+    // ============================================================
+    // Configuration
+    // ============================================================
+    const DATA_PATH = '../data';
+    const PATIENT = '01-BER-0088';
+    
+    // Colors for meshes
+    const INNER_COLOR = [255, 80, 80, 255];   // Red - Lumen
+    const OUTER_COLOR = [80, 80, 255, 200];   // Blue - Vessel wall
+
+    // ============================================================
+    // State
+    // ============================================================
+    let nv = null;
+    let mode = 'world';  // 'world' or 'cpr'
+    let vessel = 'LAD';
+
+    // ============================================================
+    // Path Helpers
+    // ============================================================
+    function volumePath() {
+      return mode === 'world' 
+        ? `${DATA_PATH}/${PATIENT}.nii.gz`
+        : `${DATA_PATH}/${PATIENT}_${vessel}_cpr_cross.nii.gz`;
+    }
+
+    function meshPath(type) {
+      const suffix = mode === 'cpr' ? '_cpr' : '';
+      return `${DATA_PATH}/${PATIENT}_${vessel}_${type}${suffix}.gii`;
+    }
+
+    // ============================================================
+    // UI Updates
+    // ============================================================
+    function status(msg) {
+      document.getElementById('statusText').textContent = msg;
+    }
+
+    function updateVolumeInfo() {
+      if (nv?.volumes?.length > 0) {
+        const v = nv.volumes[0];
+        const d = v.hdr.dims;
+        const s = v.hdr.pixDims;
+        document.getElementById('volumeInfo').textContent = 
+          `${d[1]}×${d[2]}×${d[3]} @ ${s[1].toFixed(2)}×${s[2].toFixed(2)}×${s[3].toFixed(2)}mm`;
+      }
+    }
+
+    // ============================================================
+    // Loading
+    // ============================================================
+    async function loadAll() {
+      status('Loading volume...');
+      
+      // Load volume
+      try {
+        await nv.loadVolumes([{ url: volumePath() }]);
+      } catch (e) {
+        status(`Volume error: ${e.message}`);
+        console.error(e);
+        return;
+      }
+      
+      // Clear meshes
+      while (nv.meshes.length > 0) {
+        nv.removeMesh(nv.meshes[0]);
+      }
+      
+      // Load meshes based on checkboxes
+      const meshes = [];
+      if (document.getElementById('chkInner').checked) {
+        meshes.push({ url: meshPath('inner'), rgba255: INNER_COLOR, name: 'inner' });
+      }
+      if (document.getElementById('chkOuter').checked) {
+        meshes.push({ url: meshPath('outer'), rgba255: OUTER_COLOR, name: 'outer' });
+      }
+      
+      if (meshes.length > 0) {
+        status('Loading meshes...');
+        try {
+          await nv.loadMeshes(meshes);
+          applyMeshSettings();
+        } catch (e) {
+          status(`Mesh error: ${e.message}`);
+          console.error(e);
+        }
+      }
+      
+      updateVolumeInfo();
+      status(`Ready - ${mode.toUpperCase()} mode, ${vessel}`);
+    }
+
+    function applyMeshSettings() {
+      const alpha = document.getElementById('meshAlpha').value / 100;
+      const xray = document.getElementById('meshXRay').value / 100;
+      
+      nv.opts.meshXRay = xray;
+      nv.meshes.forEach(m => { m.opacity = alpha; });
+      nv.drawScene();
+    }
+
+    // ============================================================
+    // Event Handlers
+    // ============================================================
+    function setupEvents() {
+      // Mode buttons
+      document.getElementById('btnWorld').onclick = () => {
+        if (mode === 'world') return;
+        mode = 'world';
+        document.getElementById('btnWorld').classList.add('active');
+        document.getElementById('btnCPR').classList.remove('active');
+        loadAll();
+      };
+      
+      document.getElementById('btnCPR').onclick = () => {
+        if (mode === 'cpr') return;
+        mode = 'cpr';
+        document.getElementById('btnCPR').classList.add('active');
+        document.getElementById('btnWorld').classList.remove('active');
+        loadAll();
+      };
+      
+      // Vessel select
+      document.getElementById('vesselSelect').onchange = function() {
+        vessel = this.value;
+        loadAll();
+      };
+      
+      // Mesh toggles
+      document.getElementById('chkInner').onchange = loadAll;
+      document.getElementById('chkOuter').onchange = loadAll;
+      
+      // Mesh alpha
+      document.getElementById('meshAlpha').oninput = applyMeshSettings;
+      
+      // Mesh X-Ray
+      document.getElementById('meshXRay').oninput = applyMeshSettings;
+      
+      // View select
+      document.getElementById('viewSelect').onchange = function() {
+        const views = {
+          '3d': nv.sliceTypeRender,
+          'multi': nv.sliceTypeMultiplanar,
+          'axial': nv.sliceTypeAxial,
+          'coronal': nv.sliceTypeCoronal,
+          'sagittal': nv.sliceTypeSagittal
+        };
+        nv.setSliceType(views[this.value]);
+      };
+      
+      // Crosshair
+      document.getElementById('chkCrosshair').onchange = function() {
+        nv.opts.show3Dcrosshair = this.checked;
+        nv.drawScene();
+      };
+    }
+
+    // ============================================================
+    // Initialize
+    // ============================================================
+    async function init() {
+      nv = new niivue.Niivue({
+        show3Dcrosshair: true,
+        backColor: [0.05, 0.05, 0.1, 1],
+        meshXRay: 0.3,
+        onLocationChange: (data) => {
+          document.getElementById('coordsText').textContent = data.string;
+        }
+      });
+      
+      await nv.attachTo('gl1');
+      nv.setSliceType(nv.sliceTypeRender);
+      nv.opts.showLegend = false;
+      
+      setupEvents();
+      await loadAll();
+    }
+
+    init().catch(e => {
+      status(`Init error: ${e.message}`);
+      console.error(e);
+    });
+  </script>
+</body>
+</html>

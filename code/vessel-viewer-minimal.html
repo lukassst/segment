@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MEDIS Vessel Viewer - Minimal</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: #16213e;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      border-bottom: 2px solid #e94560;
+    }
+    header h1 {
+      font-size: 16px;
+      color: #e94560;
+    }
+    button, select {
+      background: #0f3460;
+      color: #eee;
+      border: 1px solid #e94560;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover, select:hover {
+      background: #1a3a6e;
+    }
+    button.active {
+      background: #e94560;
+    }
+    main {
+      flex: 1;
+      position: relative;
+      background: #000;
+    }
+    canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    .info-bar {
+      background: #16213e;
+      padding: 8px 20px;
+      font-size: 11px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🫀 MEDIS Vessel Viewer</h1>
+    <button id="btnWorld" class="active">World</button>
+    <button id="btnCPR">CPR</button>
+    <select id="vesselSelect">
+      <option value="LAD">LAD</option>
+      <option value="RCA">RCA</option>
+      <option value="LCX">LCX</option>
+      <option value="D1">D1</option>
+    </select>
+    <label><input type="checkbox" id="chkMesh" checked /> Show Mesh</label>
+  </header>
+  
+  <main>
+    <canvas id="gl1"></canvas>
+  </main>
+  
+  <div class="info-bar">
+    <span id="statusText">Initializing...</span>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@niivue/niivue@latest/dist/niivue.umd.js"></script>
+  <script>
+    const DATA_PATH = '../data';
+    const PATIENT = '01-BER-0088';
+    
+    let nv = null;
+    let mode = 'world';
+    let vessel = 'LAD';
+
+    function status(msg) {
+      document.getElementById('statusText').textContent = msg;
+      console.log(msg);
+    }
+
+    function volumePath() {
+      return mode === 'world' 
+        ? `${DATA_PATH}/${PATIENT}.nii.gz`
+        : `${DATA_PATH}/${PATIENT}_${vessel}_cpr_cross.nii.gz`;
+    }
+
+    function meshPath() {
+      const suffix = mode === 'cpr' ? '_cpr' : '';
+      return `${DATA_PATH}/${PATIENT}_${vessel}_inner${suffix}.gii`;
+    }
+
+    async function loadAll() {
+      try {
+        status('Loading volume...');
+        const volPath = volumePath();
+        console.log('Volume path:', volPath);
+        
+        await nv.loadVolumes([{ url: volPath }]);
+        status('Volume loaded');
+        
+        // Clear meshes
+        while (nv.meshes.length > 0) {
+          nv.removeMesh(nv.meshes[0]);
+        }
+        
+        // Load mesh if checked
+        if (document.getElementById('chkMesh').checked) {
+          const mPath = meshPath();
+          console.log('Mesh path:', mPath);
+          status('Loading mesh...');
+          
+          try {
+            await nv.loadMeshes([{
+              url: mPath,
+              rgba255: [255, 100, 100, 255]
+            }]);
+            status(`Ready - ${mode.toUpperCase()} mode, ${vessel}`);
+          } catch (e) {
+            status(`Mesh load failed: ${e.message}`);
+            console.error('Mesh error:', e);
+          }
+        } else {
+          status(`Ready - ${mode.toUpperCase()} mode, ${vessel} (no mesh)`);
+        }
+        
+      } catch (e) {
+        status(`Error: ${e.message}`);
+        console.error('Load error:', e);
+      }
+    }
+
+    async function init() {
+      try {
+        status('Initializing NiiVue...');
+        
+        nv = new niivue.Niivue({
+          show3Dcrosshair: true,
+          backColor: [0.1, 0.1, 0.15, 1],
+          logging: true
+        });
+        
+        await nv.attachTo('gl1');
+        nv.setSliceType(nv.sliceTypeRender);
+        
+        // Event handlers
+        document.getElementById('btnWorld').onclick = () => {
+          if (mode === 'world') return;
+          mode = 'world';
+          document.getElementById('btnWorld').classList.add('active');
+          document.getElementById('btnCPR').classList.remove('active');
+          loadAll();
+        };
+        
+        document.getElementById('btnCPR').onclick = () => {
+          if (mode === 'cpr') return;
+          mode = 'cpr';
+          document.getElementById('btnCPR').classList.add('active');
+          document.getElementById('btnWorld').classList.remove('active');
+          loadAll();
+        };
+        
+        document.getElementById('vesselSelect').onchange = function() {
+          vessel = this.value;
+          loadAll();
+        };
+        
+        document.getElementById('chkMesh').onchange = loadAll;
+        
+        await loadAll();
+        
+      } catch (e) {
+        status(`Init error: ${e.message}`);
+        console.error('Init error:', e);
+      }
+    }
+
+    // Wait for DOM and NiiVue to be ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+  </script>
+</body>
+</html>
