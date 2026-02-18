@@ -17,6 +17,11 @@
 ## Table of Contents
 
 1. [Executive Summary & Research Vision](#1-executive-summary--research-vision)
+   - 1.1 Clinical Gap
+   - 1.2 Our Solution
+   - 1.3 Research Foundation
+   - 1.4 Success Targets (6-month horizon)
+   - 1.5 Hardware & Deployment Requirements
 2. [Foundation Model: SAM-Med3D-turbo — Verified Technical Profile](#2-foundation-model-sam-med3d-turbo--verified-technical-profile)
 3. [Clinical Domain A: Coronary CTA Segmentation (DISCHARGE)](#3-clinical-domain-a-coronary-cta-segmentation-discharge)
 4. [Clinical Domain B: Prostate mpMRI Segmentation](#4-clinical-domain-b-prostate-mpmri-segmentation)
@@ -75,6 +80,72 @@ This platform is a **test-bed for foundation-model research** in cardiovascular 
 | Cost reduction | 10× cheaper than manual contouring |
 
 > **Critical note on Dice targets:** The SAM-Med3D paper reports **87.12 % Dice on cardiac structures** with 1 prompt point (Table 5 in [1]). However, this was measured on the ACDC dataset (cardiac MRI short-axis cine), **not** coronary CTA. Coronary arteries are smaller, noisier, and motion-affected — published coronary lumen Dice values for task-specific models (nnU-Net) range 0.75–0.88 depending on vessel branch. Our 0.85 target is therefore ambitious but grounded.
+
+---
+
+## 1.5 Hardware & Deployment Requirements
+
+### 1.5.1 Development Environment
+
+| Component | Minimum | Recommended | Current Setup |
+|-----------|---------|-------------|---------------|
+| **GPU** | RTX 3060 (8GB) | RTX 2080 Ti (11GB) | ✅ 2x RTX 2080 Ti (11GB each) |
+| **CPU** | 6-core | 8+ core | Modern workstation |
+| **RAM** | 16GB | 32GB+ | Sufficient |
+| **Storage** | 500GB SSD | 1TB+ NVMe | Adequate |
+| **CUDA** | 11.8+ | 12.2+ | ✅ CUDA 12.2 |
+
+**Development Use Cases:**
+- Model testing and validation
+- Single-user interactive segmentation
+- DISCHARGE dataset research (subset processing)
+- Active learning experiments
+
+### 1.5.2 Production Environment (Charité Clinical Deployment)
+
+| Component | Minimum | Recommended | Notes |
+|-----------|---------|-------------|-------|
+| **GPU Cluster** | 2x RTX 4090 (24GB) | 4x A100/H100 (40-80GB) | Concurrent clinical users |
+| **CPU** | 16-core | 32+ core | FastAPI + preprocessing |
+| **RAM** | 64GB | 128GB+ | Multiple 3D volumes in memory |
+| **Storage** | 10TB+ | 50TB+ | DISCHARGE + clinical data |
+| **Network** | 10Gbps | 25Gbps+ | Fast volume transfers |
+| **Redundancy** | RAID 10 | Distributed storage | Clinical data safety |
+
+**Production Requirements:**
+- **GDPR Compliance**: All patient data must remain on-premise
+- **High Availability**: 99.9% uptime for clinical workflows
+- **Concurrent Users**: 5-10 radiologists simultaneously
+- **Batch Processing**: Full DISCHARGE dataset (3,561 patients)
+- **Disaster Recovery**: Automated backups and failover
+
+### 1.5.3 Critical Medical Deployment Constraint
+
+**⚠️ IN-HOUSE BACKEND MANDATORY FOR MEDICAL USE**
+
+For any clinical deployment, the SAM-Med3D-turbo model **MUST** run on Charité's on-premise infrastructure:
+
+| Requirement | Reason | Alternative |
+|------------|--------|-------------|
+| **On-premise GPU servers** | GDPR compliance - patient data cannot leave hospital | ❌ Cloud inference (HIPAA/GDPR violation) |
+| **Charité network** | Secure medical data transmission | ❌ Public internet (security risk) |
+| **Hospital authentication** | User access control and audit trails | ❌ Anonymous access (non-compliant) |
+| **Medical device certification** | Clinical safety and regulatory compliance | ❌ Research-only deployment |
+
+**Architecture Implications:**
+```
+Browser (Hospital Network) → Charité Firewall → Internal GPU Cluster
+       ↓                           ↓                        ↓
+   UI/UX + Niivue            Load Balancer          SAM-Med3D-turbo
+   3D visualization          + Authentication       PyTorch Inference
+   User prompts              + Logging               + Medical Data Store
+```
+
+**Non-Medical Use Cases:**
+- **Research demos**: Can use cloud GPU with anonymized data
+- **Development**: Local workstation with sample datasets
+- **Open-source contributions**: Public GitHub with synthetic data
+- **Educational**: Browser-only UI with mock backend
 
 ---
 
